@@ -32,7 +32,7 @@ def load_service_account_secret() -> dict:
     Accepts:
       - st.secrets['gcp_service_account'] as a dict (already parsed)
       - a string containing raw JSON
-      - a triple-quoted TOML string ("""...""") from .streamlit/secrets.toml
+      - a triple-quoted TOML string from .streamlit/secrets.toml
     Raises ValueError if parsing fails.
     """
     if "gcp_service_account" not in st.secrets:
@@ -54,8 +54,6 @@ def load_service_account_secret() -> dict:
         parsed = json.loads(s)
         return parsed
     except Exception:
-        # Replace literal newlines in the private key so JSON becomes valid if needed,
-        # also try replacing escaped newlines with actual newlines if appropriate.
         try:
             parsed = json.loads(s.replace('\\n', '\n'))
             return parsed
@@ -66,7 +64,6 @@ def load_service_account_secret() -> dict:
             except Exception as e:
                 raise ValueError("Could not parse gcp_service_account secret as JSON. "
                                  "Ensure you pasted the service account JSON correctly.") from e
-
 
 # -------------------------
 # gspread client factory (robust)
