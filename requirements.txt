@@ -1,5 +1,6 @@
 streamlit==1.30.0
 pandas==2.2.2
-gspread==5.7.2
+numpy==1.26.4
+gspread==5.8.0
 google-auth==2.20.0
 plotly==5.18.0
