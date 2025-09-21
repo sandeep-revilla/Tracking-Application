@@ -6,45 +6,6 @@ from google.oauth2.service_account import Credentials
 import gspread
 import plotly.express as px
 from datetime import datetime
-# DEBUG: inspect st.secrets["gcp_service_account"] safely
-import streamlit as _st, json as _json
-_st.title("DEBUG: secrets inspection (temporary)")
-
-try:
-    raw = _st.secrets.get("gcp_service_account", None)
-    _st.write("secret_key_present:", raw is not None)
-    _st.write("type(raw):", type(raw).__name__)
-    if raw is None:
-        _st.error("No st.secrets['gcp_service_account'] found. Check secret name and restart.")
-    else:
-        # If it's already a dict-like (Streamlit may parse TOML into nested dicts)
-        if isinstance(raw, dict):
-            _st.success("Secret is parsed as dict. top-level keys:")
-            _st.write(list(raw.keys()))
-        else:
-            s = str(raw)
-            _st.write("length of string value:", len(s))
-            _st.write("first 120 chars:", s[:120].replace("\n","\\n"))
-            _st.write("starts with triple quotes? ", s.strip().startswith('"""') or s.strip().startswith("'''"))
-            # try JSON parse as-is
-            try:
-                parsed = _json.loads(s)
-                _st.success("json.loads(raw) succeeded. top-level keys:")
-                _st.write(list(parsed.keys()))
-            except Exception as e1:
-                _st.warning("json.loads(raw) FAILED: " + str(e1))
-                # try replacing literal \n with newlines
-                try:
-                    parsed2 = _json.loads(s.replace('\\n','\n'))
-                    _st.success("json.loads(raw.replace('\\\\n','\\n')) succeeded. top-level keys:")
-                    _st.write(list(parsed2.keys()))
-                except Exception as e2:
-                    _st.error("All parse attempts failed. Last error: " + str(e2))
-except Exception as e:
-    _st.exception(e)
-
-_st.stop()  # keep debug page only, remove this block after debugging
-
 st.set_page_config(page_title="Live Expense Tracker", layout="wide")
 st.title("💸 Live Expense Tracker (Google Sheets → Streamlit)")
 
