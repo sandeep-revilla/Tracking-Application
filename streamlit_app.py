@@ -9,7 +9,7 @@ st.set_page_config(page_title="Private Sheet Loader", layout="wide")
 st.title("🔐 Private Google Sheet — connector (minimal)")
 
 # Sidebar inputs
-SHEET_ID = st.sidebar.text_input("Google Sheet ID (between /d/ and /edit)", "KZq_GLXdM8FQUhtp-NA8Jq-fIxOppw7kFuIN6y_nQXk")
+SHEET_ID = st.sidebar.text_input("Google Sheet ID (between /d/ and /edit)", "1KZq_GLXdM8FQUhtp-NA8Jq-fIxOppw7kFuIN6y_nQXk")
 RANGE = st.sidebar.text_input("Range (optional, e.g. Sheet1!A1:Z1000)", "A1:Z1000")
 if st.sidebar.button("Refresh now"):
     st.experimental_rerun()
