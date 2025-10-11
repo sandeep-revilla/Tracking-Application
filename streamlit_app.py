@@ -189,8 +189,6 @@ col4.metric("Suspicious", f"{suspicious_count:,}")
 # small secondary info row: show rows read from sheet (raw) and column list
 colA, colB = st.columns([1,3])
 colA.info(f"Rows read from sheet: **{rows_read:,}**")
-colB.write(f"Columns detected: **{', '.join(cleaned_df.columns.astype(str))}**")
-
 # Download cleaned CSV (keep)
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
