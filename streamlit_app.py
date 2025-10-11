@@ -16,8 +16,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from cleaning import clean_history_transactions
-from charts import render_chart, AVAILABLE_CHARTS
-
+from charts import monthly_trend
 
 st.set_page_config(page_title="Google Sheet Connector", layout="wide")
 st.title("🔐 Google Sheet Connector — (Connection Only)")
@@ -192,17 +191,5 @@ colA, colB = st.columns([1,3])
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
 
-# ---------- Charts only (no data tables) ----------
-st.sidebar.header("Charts")
-chart_choice = st.sidebar.selectbox("Choose chart", AVAILABLE_CHARTS)
-
-with st.expander("Chart settings (optional)", expanded=False):
-    st.write("Select a chart from the sidebar. Settings will be added later.")
-
 chart_container = st.container()
-try:
-    render_chart(chart_choice, cleaned_df, container=chart_container)
-except Exception as e:
-    chart_container.error(f"Failed to render chart '{chart_choice}': {e}")
-
-# --------------------------------------------------------------------
+monthly_trend(cleaned_df, container=chart_container, show_debug=False)
