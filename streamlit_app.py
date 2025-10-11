@@ -204,9 +204,4 @@ year_filter = None if selected_year == "All" else int(selected_year)
 
 # render chart (monthly trend) — use a single container and single call
 chart_container = st.container()
-monthly_trend(
-    cleaned_df,
-    container=chart_container,
-    year=year_filter,
-    show_debit_credit=True  # draws separate Debit and Credit lines
-)
+monthly_trend(cleaned_df, container=chart_container, year=selected_year if selected_year!="All" else None, show_debit_credit=True)
