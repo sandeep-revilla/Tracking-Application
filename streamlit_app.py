@@ -1,10 +1,7 @@
 # streamlit_app.py
 """
-Streamlit App: Read transactions from Google Sheets and show an interactive
-Plotly line chart of daily debit totals (true zigzag, non-cumulative).
-
-Paste this file as streamlit_app.py and run:
-    streamlit run streamlit_app.py
+Streamlit App: Read transactions from Google Sheets and show a Matplotlib
+line chart of daily debit totals (true zigzag, non-cumulative).
 """
 
 import streamlit as st
@@ -14,11 +11,14 @@ import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import plotly.express as px
 
-# ---------------- Page ----------------
-st.set_page_config(page_title="💸 Debit Trend Dashboard", layout="wide")
-st.title("💸 Daily Debit Spending Trend (from Google Sheet)")
+# matplotlib imports
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
+
+st.set_page_config(page_title="💸 Debit Trend (Matplotlib)", layout="wide")
+st.title("💸 Daily Debit Spending Trend — Matplotlib (True Daily Totals)")
 
 # ---------------- Sidebar inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -51,19 +51,19 @@ def parse_service_account_secret(raw):
 
 @st.cache_data(ttl=300)
 def build_sheets_service(creds_info=None, creds_file=None):
-    """Return Google Sheets service client using either creds_info or a file path."""
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     if creds_info:
         creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
     else:
         if not (creds_file and os.path.exists(creds_file)):
-            raise FileNotFoundError("No credentials provided. Put service account JSON path in sidebar or in st.secrets['gcp_service_account'].")
+            raise FileNotFoundError(
+                "No credentials provided. Put service account JSON path in sidebar or st.secrets['gcp_service_account']." )
         creds = service_account.Credentials.from_service_account_file(creds_file, scopes=scopes)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 @st.cache_data(ttl=300)
 def read_google_sheet(spreadsheet_id, range_name, creds_info=None, creds_file=None):
-    """Read a Google Sheet range (values.get) and return a pandas DataFrame."""
+    """Read a Google Sheet range using values.get and return a DataFrame."""
     service = build_sheets_service(creds_info, creds_file)
     sheet = service.spreadsheets()
     try:
@@ -79,7 +79,7 @@ def read_google_sheet(spreadsheet_id, range_name, creds_info=None, creds_file=No
     return df
 
 def normalize_and_map_columns(df):
-    """Robustly map common header names to DateTime, Type, Amount."""
+    """Map common header names to DateTime, Type, Amount."""
     cols = {c.lower().strip(): c for c in df.columns}
     mapping = {}
     for key in cols:
@@ -94,7 +94,7 @@ def normalize_and_map_columns(df):
     return df
 
 def parse_amount_column(series):
-    """Parse amounts safely: strip commas & non-numeric chars but keep - and ."""
+    """Parse amounts: remove commas & non-digit chars (keep dot and minus)."""
     s = series.astype(str).fillna("")
     cleaned = s.str.replace(",", "", regex=False)
     cleaned = cleaned.str.replace(r"[^\d\.\-]", "", regex=True)
@@ -117,7 +117,7 @@ if df.empty:
 
 st.success(f"✅ Loaded {len(df):,} rows from Google Sheet.")
 
-# ---------------- Clean / standardize ----------------
+# ---------------- Clean & standardize ----------------
 df = normalize_and_map_columns(df)
 
 required = {"DateTime", "Type", "Amount"}
@@ -132,20 +132,19 @@ df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
 df["Amount"] = parse_amount_column(df["Amount"])
 df = df.dropna(subset=["DateTime", "Amount", "Type"])
 
-# ---------------- Filter debits and aggregate by day ----------------
+# ---------------- Filter debits and aggregate daily totals ----------------
 df["Type_clean"] = df["Type"].astype(str).str.lower().str.strip()
 df_debit = df[df["Type_clean"].str.contains("debit", na=False)].copy()
 if df_debit.empty:
-    st.warning("No debit transactions found in the sheet after filtering.")
+    st.warning("No debit transactions found after filtering.")
     st.stop()
 
-# Ensure amounts are positive magnitudes for plotting
+# Ensure positive amounts for plotting (use magnitude)
 df_debit["Amount"] = df_debit["Amount"].abs()
 
-# Create a date column (datetime at midnight) for grouping & plotting
+# Create Date column (midnight) for grouping
 df_debit["Date"] = pd.to_datetime(df_debit["DateTime"].dt.date)
 
-# Group by date (non-cumulative daily totals)
 daily_spend = (
     df_debit.groupby("Date", as_index=False)["Amount"]
     .sum()
@@ -154,35 +153,12 @@ daily_spend = (
 )
 
 if daily_spend.empty:
-    st.warning("No daily totals available after aggregation.")
+    st.warning("No aggregated daily totals available.")
     st.stop()
 
-# ---------------- Date range selector ----------------
-min_date, max_date = daily_spend["Date"].min().date(), daily_spend["Date"].max().date()
-date_range = st.sidebar.date_input("📅 Select Date Range", [min_date, max_date])
-
-if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-    start, end = date_range
-    start = pd.to_datetime(start).normalize()
-    end = pd.to_datetime(end).normalize()
-    daily_spend = daily_spend[(daily_spend["Date"] >= start) & (daily_spend["Date"] <= end)]
-else:
-    # handle single selection fallback
-    selected = pd.to_datetime(date_range).normalize()
-    daily_spend = daily_spend[daily_spend["Date"] == selected]
-
-if daily_spend.empty:
-    st.warning("No data in the selected date range.")
-    st.stop()
-
-# ---------------- Plot options to reveal zigzag ----------------
-daily_spend = daily_spend.sort_values("Date").reset_index(drop=True)
-
-st.sidebar.write("📈 Plot display options")
-mode = st.sidebar.radio(
-    "Display mode",
-    options=["Raw (full amounts)", "Rescale to ₹k (thousands)", "Clip to 95th percentile"]
-)
+# ---------------- Sidebar plot options ----------------
+st.sidebar.write("📈 Plot display options (Matplotlib)")
+mode = st.sidebar.radio("Display mode", ["Raw (full amounts)", "Rescale to ₹k (thousands)", "Clip to 95th percentile"])
 
 use_custom = st.sidebar.checkbox("Use custom Y range", value=False)
 custom_min = None
@@ -191,8 +167,8 @@ if use_custom:
     custom_min = st.sidebar.number_input("Y-axis min", value=0.0, step=1.0)
     custom_max = st.sidebar.number_input("Y-axis max", value=float(daily_spend["Total_Spent"].max()), step=1.0)
 
-plot_df = daily_spend.copy()
-plot_df["Plot_Value"] = plot_df["Total_Spent"]  # default
+plot_df = daily_spend.copy().sort_values("Date").reset_index(drop=True)
+plot_df["Plot_Value"] = plot_df["Total_Spent"]
 y_label = "Daily Spent (₹)"
 
 if mode == "Rescale to ₹k (thousands)":
@@ -200,72 +176,72 @@ if mode == "Rescale to ₹k (thousands)":
     y_label = "Daily Spent (₹k)"
 elif mode == "Clip to 95th percentile":
     p95 = plot_df["Total_Spent"].quantile(0.95)
-    outliers_count = (plot_df["Total_Spent"] > p95).sum()
-    st.sidebar.write(f"Clipping to 95th percentile = {p95:,.0f}. Outliers hidden: {outliers_count}")
+    outliers = (plot_df["Total_Spent"] > p95).sum()
+    st.sidebar.write(f"Clipping to 95th percentile = {p95:,.0f} (hiding {outliers} outlier(s))")
     plot_df["Plot_Value"] = plot_df["Total_Spent"].clip(upper=p95)
     y_label = f"Daily Spent (₹) — clipped @95p ({p95:,.0f})"
 
 # Y range
 if use_custom:
-    y_range = [custom_min, custom_max]
+    y_min, y_max = custom_min, custom_max
 else:
-    ymin = float(plot_df["Plot_Value"].min() * 0.0)  # usually zero
-    ymax = float(plot_df["Plot_Value"].max() * 1.03)  # slight headroom
-    y_range = [ymin, ymax]
+    y_min = max(0, float(plot_df["Plot_Value"].min() * 0.0))
+    y_max = float(plot_df["Plot_Value"].max() * 1.03)
 
-# ---------- Diagnostics (optional) ----------
+# ---------------- Diagnostics ----------------
 st.subheader("Diagnostics: daily_spend")
 col1, col2 = st.columns([1, 2])
 with col1:
-    st.write("Rows:", len(daily_spend))
-    st.write(f"Min: {daily_spend['Total_Spent'].min():,.2f}")
-    st.write(f"Max: {daily_spend['Total_Spent'].max():,.2f}")
+    st.write("Rows:", len(plot_df))
+    st.write(f"Min: {plot_df['Plot_Value'].min():,.2f}")
+    st.write(f"Max: {plot_df['Plot_Value'].max():,.2f}")
 with col2:
-    st.dataframe(daily_spend.head(15))
+    st.dataframe(plot_df.head(20))
+plot_df["diff"] = plot_df["Total_Spent"].diff()
+st.write("Day-to-day diffs (first 20 rows):")
+st.dataframe(plot_df[["Date", "Total_Spent", "diff"]].head(20))
 
-daily_spend["diff"] = daily_spend["Total_Spent"].diff()
-st.write("Day-to-day diffs (first 15 rows):")
-st.dataframe(daily_spend[["Date", "Total_Spent", "diff"]].head(15))
+# ---------------- Matplotlib plotting ----------------
+st.subheader("Matplotlib — Line (linear) + markers (true zigzag)")
 
-# ---------- Scatter (verify points) ----------
-st.subheader("Scatter of raw daily totals (verifies point positions)")
-fig_scatter = px.scatter(
-    plot_df,
-    x="Date",
-    y="Plot_Value",
-    title="Raw daily points (no connecting lines)",
-    labels={"Plot_Value": y_label, "Date": "Date"},
-    render_mode="svg",
-)
-fig_scatter.update_traces(marker=dict(size=7, color="darkblue"))
-fig_scatter.update_layout(yaxis=dict(tickformat=",.0f", range=y_range), template="plotly_white", height=420)
-st.plotly_chart(fig_scatter, use_container_width=True)
+fig, ax = plt.subplots(figsize=(12, 5.5))
 
-# ---------- Line + markers (true zigzag) ----------
-st.subheader("Line + markers (linear connections — true zigzag)")
-fig = px.line(
-    plot_df,
-    x="Date",
-    y="Plot_Value",
-    title="Daily Debit Spending (linear — lines+markers)",
-    labels={"Plot_Value": y_label, "Date": "Date"},
-    line_shape="linear",
-    render_mode="svg",
-)
-fig.update_traces(mode="lines+markers", line_color="#0074D9", marker=dict(size=6))
-fig.update_layout(
-    template="plotly_white",
-    hovermode="x unified",
-    height=560,
-    xaxis=dict(tickformat="%b %d\n%Y"),
-    yaxis=dict(title=y_label, tickformat=",.0f", range=y_range),
-    margin=dict(l=60, r=30, t=70, b=80),
-)
-st.plotly_chart(fig, use_container_width=True)
+# Plot line + markers
+ax.plot(plot_df["Date"], plot_df["Plot_Value"], marker='o', linestyle='-', color='#0074D9', linewidth=1.8, markersize=6)
 
-# ---------- Debug expanders ----------
-with st.expander("🔍 Raw Total_Spent list (for debugging)"):
-    st.write(daily_spend[["Date", "Total_Spent"]].to_string(index=False))
+# Format x-axis for dates
+ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
+plt.xticks(rotation=20)
 
-with st.expander("🔍 Full aggregated table"):
+# Y-axis formatting: comma separator, optionally show 'k' label if rescaled
+def yfmt(x, pos):
+    if mode == "Rescale to ₹k (thousands)":
+        # display with one decimal if needed
+        if abs(x) >= 100:
+            return f"{x:,.0f}"
+        return f"{x:,.1f}"
+    else:
+        return f"{int(x):,}"
+ax.yaxis.set_major_formatter(FuncFormatter(yfmt))
+
+ax.set_ylabel(y_label)
+ax.set_xlabel("Date")
+ax.set_title("Daily Debit Spending (Matplotlib — linear connections, no smoothing)")
+
+# Set y-limits
+ax.set_ylim(y_min, y_max)
+
+# Grid & layout
+ax.grid(axis='y', linestyle='--', alpha=0.4)
+plt.tight_layout()
+
+# Show in Streamlit
+st.pyplot(fig)
+
+# ---------------- Optional: show raw aggregated table ----------------
+with st.expander("🔍 Daily aggregated totals (raw)"):
     st.dataframe(daily_spend.reset_index(drop=True), use_container_width=True)
+
+with st.expander("🔍 Raw debit transactions sample"):
+    st.dataframe(df_debit.head(100), use_container_width=True)
