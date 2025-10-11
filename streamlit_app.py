@@ -22,7 +22,7 @@ st.set_page_config(page_title="Google Sheet Connector", layout="wide")
 st.title("🔐 Google Sheet Connector — (Connection Only)")
 
 # ---------------- Sidebar Inputs ----------------
-SHEET_ID = st.sidebar.text_input("Google Sheet ID (between /d/ and /edit)", value="")
+SHEET_ID = st.sidebar.text_input("Google Sheet ID (between /d/ and /edit)", value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk")
 RANGE = st.sidebar.text_input("Range or Sheet Name", value="History Transactions")
 st.sidebar.caption("Provide your Service Account JSON via st.secrets['gcp_service_account'] or as a local file below.")
 CREDS_FILE = st.sidebar.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
@@ -161,7 +161,7 @@ rows_read = len(df)
 st.success(f"✅ Successfully loaded data from Google Sheet — {rows_read:,} rows read.")
 
 # aggregated KPIs (displayed prominently)
-total_rows_cleaned = len(cleaned_df)
+
 
 # safe computations (guard against missing columns)
 def safe_sum_by_type(df_in, match_str):
@@ -180,7 +180,6 @@ except Exception:
 
 # show KPIs in a single row
 col1, col2, col3, col4 = st.columns([1,1,1,1])
-col1.metric("Rows (cleaned)", f"{total_rows_cleaned:,}")
 col2.metric("Total Debit", f"{total_debit:,.2f}")
 col3.metric("Total Credit", f"{total_credit:,.2f}")
 col4.metric("Suspicious", f"{suspicious_count:,}")
