@@ -16,7 +16,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from cleaning import clean_history_transactions
-from charts import monthly_trend
+
 
 st.set_page_config(page_title="Google Sheet Connector", layout="wide")
 st.title("🔐 Google Sheet Connector — (Connection Only)")
