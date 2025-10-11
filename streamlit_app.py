@@ -1,12 +1,11 @@
 # streamlit_app.py
 """
-Streamlit App: Connect to Google Sheet and show interactive Plotly Debit Chart (non-cumulative)
+Streamlit App: Connect to Google Sheet and show interactive Plotly Debit Chart (Zigzag Daily)
 """
 
 import streamlit as st
 import pandas as pd
 import json
-import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -93,16 +92,11 @@ df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
 df = df.dropna(subset=["DateTime", "Amount", "Type"])
 
 # ---------------- FILTER + AGGREGATE ----------------
-# Filter only debit transactions
 df_debit = df[df["Type"].str.lower().str.strip() == "debit"]
-
-# Ensure positive debit amounts
 df_debit["Amount"] = df_debit["Amount"].abs()
-
-# Extract just the date (drop time)
 df_debit["Date"] = df_debit["DateTime"].dt.date
 
-# ✅ Calculate *daily* (non-cumulative) total debit spend
+# ✅ Daily totals (non-cumulative)
 daily_spend = (
     df_debit.groupby("Date", as_index=False)["Amount"]
     .sum()
@@ -110,8 +104,8 @@ daily_spend = (
     .sort_values("Date")
 )
 
-# Add rolling 3-day average for smoother trend
-daily_spend["Rolling_Avg"] = daily_spend["Total_Spent"].rolling(window=3).mean()
+# Add rolling average for trend
+daily_spend["Rolling_Avg"] = daily_spend["Total_Spent"].rolling(window=3, min_periods=1).mean()
 
 # ---------------- INTERACTIVE FILTER ----------------
 min_date, max_date = daily_spend["Date"].min(), daily_spend["Date"].max()
@@ -128,21 +122,21 @@ fig = px.line(
     daily_spend,
     x="Date",
     y="Total_Spent",
-    title="📈 Daily Debit Spending (Non-Cumulative)",
+    title="📈 Daily Debit Spending (Zigzag, Non-Cumulative)",
     markers=True,
-    line_shape="spline",
+    line_shape="linear",  # 🔹 Use linear to preserve real zigzags
 )
 
-# Add 3-day rolling average as dashed orange line
+# Add rolling average for smooth trend
 fig.add_scatter(
     x=daily_spend["Date"],
     y=daily_spend["Rolling_Avg"],
     mode="lines",
     name="3-Day Avg",
-    line=dict(width=2, dash="dash", color="orange"),
+    line=dict(width=2, dash="dot", color="orange"),
 )
 
-fig.update_traces(line=dict(width=3, color="#0074D9"))
+fig.update_traces(line=dict(width=2, color="#1f77b4"))
 fig.update_layout(
     xaxis_title="Date",
     yaxis_title="Daily Spend (₹)",
