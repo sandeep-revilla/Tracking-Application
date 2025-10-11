@@ -14,6 +14,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import plotly.express as px
 
+
 st.set_page_config(page_title="💸 Debit Trend Dashboard", layout="wide")
 st.title("💸 Daily Debit Spending Trend (from Google Sheet)")
 
@@ -118,95 +119,19 @@ if df.empty:
 st.success(f"✅ Loaded {len(df):,} rows from Google Sheet.")
 
 # ---------------- Clean / standardize columns ----------------
-df = normalize_and_map_columns(df)
+# Ensure dates are sorted for proper line plotting
+daily_spend = df.sort_values('Date')
 
-required = {"DateTime", "Type", "Amount"}
-if not required.issubset(set(df.columns)):
-    st.error(f"Missing required columns: {required - set(df.columns)}. Sheet columns: {list(df.columns)}")
-    with st.expander("Raw sheet header"):
-        st.write(list(df.columns))
-    st.stop()
-
-# Parse types
-df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
-df["Amount"] = parse_amount_column(df["Amount"])
-# drop rows lacking essential values
-df = df.dropna(subset=["DateTime", "Amount", "Type"])
-
-# ---------------- Filter debits and aggregate by day ----------------
-# filter 'debit' robustly
-df["Type_clean"] = df["Type"].astype(str).str.lower().str.strip()
-df_debit = df[df["Type_clean"].str.contains("debit", na=False)].copy()
-if df_debit.empty:
-    st.warning("No debit transactions found in the sheet after filtering.")
-    st.stop()
-
-# if amounts are stored negative for debits, take absolute to show magnitude
-df_debit["Amount"] = df_debit["Amount"].abs()
-
-# Extract date (as datetime for Plotly)
-df_debit["Date"] = pd.to_datetime(df_debit["DateTime"].dt.date)
-
-# Group by date (non-cumulative daily totals)
-daily_spend = (
-    df_debit.groupby("Date", as_index=False)["Amount"]
-    .sum()
-    .rename(columns={"Amount": "Total_Spent"})
-    .sort_values("Date")
-)
-
-if daily_spend.empty:
-    st.warning("No daily totals available after aggregation.")
-    st.stop()
-
-# ---------------- Date range selector ----------------
-min_date, max_date = daily_spend["Date"].min().date(), daily_spend["Date"].max().date()
-date_range = st.sidebar.date_input("📅 Select Date Range", [min_date, max_date])
-
-if isinstance(date_range, tuple) or isinstance(date_range, list):
-    if len(date_range) == 2:
-        start, end = date_range
-        start = pd.to_datetime(start).normalize()
-        end = pd.to_datetime(end).normalize()
-        daily_spend = daily_spend[(daily_spend["Date"] >= start) & (daily_spend["Date"] <= end)]
-else:
-    # single date selected -> show that day only
-    selected = pd.to_datetime(date_range).normalize()
-    daily_spend = daily_spend[daily_spend["Date"] == selected]
-
-if daily_spend.empty:
-    st.warning("No data in the selected date range.")
-    st.stop()
-
-# ---------------- Plotly line (true zigzag) ----------------
+# Create the Plotly line chart (straight line segments)
 fig = px.line(
-    daily_spend,
-    x="Date",
-    y="Total_Spent",
-    title="📈 Daily Debit Spending (True Daily Totals — Zigzag)",
-    labels={"Total_Spent": "Daily Spent (₹)", "Date": "Date"},
-    markers=True,
-    line_shape="linear",  # linear preserves actual ups/downs
+    daily_spend, 
+    x='Date', 
+    y='Total_Spent', 
+    title='Daily Debit Spending', 
+    line_shape='linear',     # linear segments between points
+    render_mode='svg'        # SVG for crisp lines
 )
-
-# small UI tweaks: show markers clearly and format y axis
-fig.update_traces(mode="lines+markers", marker=dict(size=6))
-fig.update_layout(
-    template="plotly_white",
-    hovermode="x unified",
-    height=600,
-    xaxis=dict(title="Date", tickformat="%b %d\n%Y"),
-    yaxis=dict(title="Daily Spent (₹)", tickformat=","),
-    margin=dict(l=60, r=30, t=70, b=80),
-)
+# Add markers to verify individual values
+fig.update_traces(mode='lines+markers', line_color='blue')
 
 st.plotly_chart(fig, use_container_width=True)
-
-# ---------------- Debug / data preview ----------------
-with st.expander("🔍 View Raw & Aggregated Data"):
-    st.subheader("Sample raw rows (first 50)")
-    st.dataframe(df_debit.head(50))
-    st.subheader("Daily aggregated totals")
-    st.dataframe(daily_spend.head(50))
-    st.write("dtypes:")
-    st.write(df_debit.dtypes)
