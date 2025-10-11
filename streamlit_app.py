@@ -1,6 +1,6 @@
 # streamlit_app.py
 """
-Streamlit App: Connect to Google Sheet and show interactive Plotly Debit Chart
+Streamlit App: Connect to Google Sheet and show interactive Plotly Debit Chart (non-cumulative)
 """
 
 import streamlit as st
@@ -93,19 +93,25 @@ df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
 df = df.dropna(subset=["DateTime", "Amount", "Type"])
 
 # ---------------- FILTER + AGGREGATE ----------------
+# Filter only debit transactions
 df_debit = df[df["Type"].str.lower().str.strip() == "debit"]
 
-# ✅ Important: Make sure amounts are positive (if debit recorded as negative)
+# Ensure positive debit amounts
 df_debit["Amount"] = df_debit["Amount"].abs()
 
-# Group by date (sum of daily spend)
+# Extract just the date (drop time)
+df_debit["Date"] = df_debit["DateTime"].dt.date
+
+# ✅ Calculate *daily* (non-cumulative) total debit spend
 daily_spend = (
-    df_debit.groupby(df_debit["DateTime"].dt.date)["Amount"]
+    df_debit.groupby("Date", as_index=False)["Amount"]
     .sum()
-    .reset_index()
-    .rename(columns={"DateTime": "Date", "Amount": "Total_Spent"})
+    .rename(columns={"Amount": "Total_Spent"})
     .sort_values("Date")
 )
+
+# Add rolling 3-day average for smoother trend
+daily_spend["Rolling_Avg"] = daily_spend["Total_Spent"].rolling(window=3).mean()
 
 # ---------------- INTERACTIVE FILTER ----------------
 min_date, max_date = daily_spend["Date"].min(), daily_spend["Date"].max()
@@ -122,15 +128,24 @@ fig = px.line(
     daily_spend,
     x="Date",
     y="Total_Spent",
-    title="📈 Daily Debit Spending Over Time",
+    title="📈 Daily Debit Spending (Non-Cumulative)",
     markers=True,
-    line_shape="spline",  # smooth curve
+    line_shape="spline",
+)
+
+# Add 3-day rolling average as dashed orange line
+fig.add_scatter(
+    x=daily_spend["Date"],
+    y=daily_spend["Rolling_Avg"],
+    mode="lines",
+    name="3-Day Avg",
+    line=dict(width=2, dash="dash", color="orange"),
 )
 
 fig.update_traces(line=dict(width=3, color="#0074D9"))
 fig.update_layout(
     xaxis_title="Date",
-    yaxis_title="Total Spent (₹)",
+    yaxis_title="Daily Spend (₹)",
     hovermode="x unified",
     template="plotly_white",
     height=600,
