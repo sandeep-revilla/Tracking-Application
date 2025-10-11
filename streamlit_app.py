@@ -131,116 +131,87 @@ df["Amount"] = parse_amount_column(df["Amount"])
 # drop rows lacking essential values
 df = df.dropna(subset=["DateTime", "Amount", "Type"])
 
-# ---------------- Filter debits and aggregate by day ----------------
-# filter 'debit' robustly
-df["Type_clean"] = df["Type"].astype(str).str.lower().str.strip()
-df_debit = df[df["Type_clean"].str.contains("debit", na=False)].copy()
-if df_debit.empty:
-    st.warning("No debit transactions found in the sheet after filtering.")
-    st.stop()
-
-# if amounts are stored negative for debits, take absolute to show magnitude
-df_debit["Amount"] = df_debit["Amount"].abs()
-
-# Extract date and ensure proper dtype
-df_debit["Date"] = pd.to_datetime(df_debit["DateTime"].dt.date)
-
-# Group by date (non-cumulative daily totals)
-daily_spend = (
-    df_debit.groupby("Date", as_index=False)["Amount"]
-    .sum()
-    .rename(columns={"Amount": "Total_Spent"})
-    .sort_values("Date")
-)
-
-if daily_spend.empty:
-    st.warning("No daily totals available after aggregation.")
-    st.stop()
-
-# ---------------- Date range selector ----------------
-min_date, max_date = daily_spend["Date"].min().date(), daily_spend["Date"].max().date()
-date_range = st.sidebar.date_input("📅 Select Date Range", [min_date, max_date])
-
-if isinstance(date_range, (tuple, list)):
-    if len(date_range) == 2:
-        start, end = date_range
-        start = pd.to_datetime(start).normalize()
-        end = pd.to_datetime(end).normalize()
-        daily_spend = daily_spend[(daily_spend["Date"] >= start) & (daily_spend["Date"] <= end)]
-else:
-    # single date selected -> show that day only
-    selected = pd.to_datetime(date_range).normalize()
-    daily_spend = daily_spend[daily_spend["Date"] == selected]
-
-if daily_spend.empty:
-    st.warning("No data in the selected date range.")
-    st.stop()
-
-# ---------------- Plotly line (true zigzag) ----------------
-# Ensure daily_spend is sorted by Date
-# ---------- Diagnostics & Fixed Plotting (paste here) ----------
-# daily_spend should already exist and be sorted by Date
+# ---------- Plot with zoom/rescale options to show zigzag ----------
+# we assume 'daily_spend' exists and is sorted by Date
 daily_spend = daily_spend.sort_values("Date").reset_index(drop=True)
 
-# Quick diagnostics printed to Streamlit
-st.subheader("Diagnostics: daily_spend")
-st.write("Rows:", len(daily_spend))
-st.write(daily_spend.head(12))            # sample rows
-st.write(daily_spend.describe())          # numeric summary
-
-# Show min, max, small table of top N largest values
-mx = daily_spend["Total_Spent"].max()
-mn = daily_spend["Total_Spent"].min()
-st.write(f"Min: {mn:,}  Max: {mx:,}")
-
-# Show day-to-day differences to confirm zigzag
-daily_spend["diff"] = daily_spend["Total_Spent"].diff()
-st.write("First 10 diffs (positive = up, negative = down):")
-st.write(daily_spend[["Date", "Total_Spent", "diff"]].head(15))
-
-# If you want to zoom the y-axis to make small variations visible, choose a multiplier:
-auto_min = float(daily_spend["Total_Spent"].min())
-auto_max = float(daily_spend["Total_Spent"].max())
-# Let user optionally set a zoom factor
-zoom = st.sidebar.slider("Y-axis zoom factor (smaller shows more detail)", min_value=0.1, max_value=2.0, value=1.0, step=0.1)
-ymin = max(0, auto_min / zoom)
-ymax = auto_max / max(1e-6, zoom)  # prevent div by zero
-
-# PLOT A: scatter (raw points) — useful to verify exact positions
-st.subheader("Scatter of raw daily totals (verifies point positions)")
-fig_scatter = px.scatter(
-    daily_spend,
-    x="Date",
-    y="Total_Spent",
-    title="Raw daily points (no connecting lines)",
-    labels={"Total_Spent": "Daily Spent (₹)"},
-    render_mode="svg"
+# Sidebar display options
+st.sidebar.write("📈 Plot display options")
+mode = st.sidebar.radio(
+    "Display mode",
+    options=["Raw (full amounts)", "Rescale to ₹k (thousands)", "Clip to 95th percentile"]
 )
-fig_scatter.update_traces(marker=dict(size=8, color="darkblue"))
-fig_scatter.update_layout(yaxis=dict(tickformat=",.0f", range=[ymin, ymax]))
-st.plotly_chart(fig_scatter, use_container_width=True)
 
-# PLOT B: line + markers (true zigzag)
-st.subheader("Line + markers (linear connections — true zigzag)")
+# Optional custom y-range (for manual zoom)
+use_custom = st.sidebar.checkbox("Use custom Y range", value=False)
+custom_min = None
+custom_max = None
+if use_custom:
+    custom_min = st.sidebar.number_input("Y-axis min", value=0.0, step=1.0)
+    custom_max = st.sidebar.number_input("Y-axis max", value=float(daily_spend["Total_Spent"].max()), step=1.0)
+
+# Prepare plotting series depending on selected mode
+plot_df = daily_spend.copy()
+y_label = "Daily Spent (₹)"
+y_col = "Total_Spent"
+
+if mode == "Rescale to ₹k (thousands)":
+    plot_df["Plot_Value"] = plot_df["Total_Spent"] / 1000.0
+    y_label = "Daily Spent (₹k)"
+    y_col = "Plot_Value"
+elif mode == "Clip to 95th percentile":
+    p95 = plot_df["Total_Spent"].quantile(0.95)
+    # Mark outliers for information
+    outliers_count = (plot_df["Total_Spent"] > p95).sum()
+    st.sidebar.write(f"Clipping to 95th percentile = {p95:,.0f}. Outliers hidden: {outliers_count}")
+    # create a clipped column for plotting (so axis is capped)
+    plot_df["Plot_Value"] = plot_df["Total_Spent"].clip(upper=p95)
+    y_label = f"Daily Spent (₹) — clipped @95p ({p95:,.0f})"
+    y_col = "Plot_Value"
+else:
+    # Raw
+    plot_df["Plot_Value"] = plot_df["Total_Spent"]
+    y_col = "Plot_Value"
+
+# Determine y-axis range
+if use_custom:
+    y_range = [custom_min, custom_max]
+else:
+    # automatic but prevent +/- tiny padding
+    ymin = float(plot_df[y_col].min() * 0.0)  # typically 0
+    ymax = float(plot_df[y_col].max() * 1.03)  # small headroom
+    y_range = [ymin, ymax]
+
+# Diagnostics quick readout (optional)
+st.write(f"Data points: {len(plot_df)} — min {plot_df['Total_Spent'].min():,.0f}, max {plot_df['Total_Spent'].max():,.0f}")
+
+# Plot: line + markers (linear, no smoothing)
 fig = px.line(
-    daily_spend,
+    plot_df,
     x="Date",
-    y="Total_Spent",
+    y=y_col,
     title="Daily Debit Spending (linear — lines+markers)",
-    labels={"Total_Spent": "Daily Spent (₹)"},
-    line_shape="linear",    # keep straight segments
-    render_mode="svg"
+    labels={y_col: y_label, "Date": "Date"},
+    line_shape="linear",
+    render_mode="svg",
 )
-fig.update_traces(mode="lines+markers", line_color="blue", marker=dict(size=6))
-# Force y-axis to show actual numbers (no SI scaling), and optionally zoom:
+
+fig.update_traces(mode="lines+markers", line_color="#0074D9", marker=dict(size=6))
 fig.update_layout(
-    yaxis=dict(tickformat=",.0f", range=[ymin, ymax]),
-    xaxis=dict(tickformat="%b %d\n%Y"),
     template="plotly_white",
     hovermode="x unified",
+    height=600,
+    xaxis=dict(tickformat="%b %d\n%Y"),
+    yaxis=dict(title=y_label, tickformat=",.0f", range=y_range),
 )
+
 st.plotly_chart(fig, use_container_width=True)
 
-# If the line still looks monotonic, show the actual y values in hover by printing the list:
-with st.expander("Raw Total_Spent list (for debugging)"):
-    st.write(daily_spend[["Date", "Total_Spent"]].to_string(index=False))
+# Expanders: show raw values and diffs for debugging
+with st.expander("🔍 Raw Total_Spent list (first 50)"):
+    st.write(daily_spend[["Date", "Total_Spent"]].head(50).to_string(index=False))
+
+with st.expander("🔍 Day-to-day diffs (first 30)"):
+    diffs = daily_spend.copy()
+    diffs["diff"] = diffs["Total_Spent"].diff()
+    st.write(diffs[["Date", "Total_Spent", "diff"]].head(30).to_string(index=False))
