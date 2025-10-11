@@ -138,8 +138,6 @@ with st.spinner("🔄 Fetching data from Google Sheets..."):
     except Exception as e:
         st.error(f"❌ Failed to read Google Sheet: {e}")
         st.stop()
-# ✅ Show how many rows were read from the Google Sheet
-st.success(f"✅ Successfully loaded data from Google Sheet — {len(df):,} rows read.")
 if df.empty:
     st.warning("⚠️ No data returned. Check the sheet name/range and ensure the service account has viewer access.")
     st.stop()
@@ -157,35 +155,57 @@ try:
 except Exception as e:
     st.error(f"Cleaning failed: {e}")
     st.stop()
+# ---------- Show counts, KPIs, download and charts (no tables) ----------
 
-st.subheader("Cleaned data (preview)")
-st.dataframe(cleaned_df.head(100), use_container_width=True)
-st.caption(f"Cleaned rows: {len(cleaned_df)} | Columns: {', '.join(cleaned_df.columns.astype(str))}")
+# show how many rows were read from the sheet (raw)
+rows_read = len(df)
+st.success(f"✅ Successfully loaded data from Google Sheet — {rows_read:,} rows read.")
 
-# Simple KPIs
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Rows (cleaned)", len(cleaned_df))
+# aggregated KPIs (displayed prominently)
+total_rows_cleaned = len(cleaned_df)
 
-# guard against missing columns
-try:
-    total_debit = cleaned_df.loc[cleaned_df["Type"].str.lower().str.contains("debit", na=False), "Amount"].sum()
-except Exception:
-    total_debit = 0.0
-try:
-    total_credit = cleaned_df.loc[cleaned_df["Type"].str.lower().str.contains("credit", na=False), "Amount"].sum()
-except Exception:
-    total_credit = 0.0
+# safe computations (guard against missing columns)
+def safe_sum_by_type(df_in, match_str):
+    try:
+        return df_in.loc[df_in["Type"].str.lower().str.contains(match_str, na=False), "Amount"].sum()
+    except Exception:
+        return 0.0
+
+total_debit = safe_sum_by_type(cleaned_df, "debit")
+total_credit = safe_sum_by_type(cleaned_df, "credit")
+
 try:
     suspicious_count = int(cleaned_df["Suspicious"].sum())
 except Exception:
     suspicious_count = 0
 
+# show KPIs in a single row
+col1, col2, col3, col4 = st.columns([1,1,1,1])
+col1.metric("Rows (cleaned)", f"{total_rows_cleaned:,}")
 col2.metric("Total Debit", f"{total_debit:,.2f}")
 col3.metric("Total Credit", f"{total_credit:,.2f}")
-col4.metric("Suspicious", suspicious_count)
+col4.metric("Suspicious", f"{suspicious_count:,}")
 
-# Download cleaned CSV
+# small secondary info row: show rows read from sheet (raw) and column list
+colA, colB = st.columns([1,3])
+colA.info(f"Rows read from sheet: **{rows_read:,}**")
+colB.write(f"Columns detected: **{', '.join(cleaned_df.columns.astype(str))}**")
+
+# Download cleaned CSV (keep)
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
-# --------------------------------------------------------------------
 
+# ---------- Charts only (no data tables) ----------
+st.sidebar.header("Charts")
+chart_choice = st.sidebar.selectbox("Choose chart", AVAILABLE_CHARTS)
+
+with st.expander("Chart settings (optional)", expanded=False):
+    st.write("Select a chart from the sidebar. Settings will be added later.")
+
+chart_container = st.container()
+try:
+    render_chart(chart_choice, cleaned_df, container=chart_container)
+except Exception as e:
+    chart_container.error(f"Failed to render chart '{chart_choice}': {e}")
+
+# --------------------------------------------------------------------
