@@ -195,19 +195,9 @@ if "DateTime" in cleaned_df.columns and not cleaned_df["DateTime"].dropna().empt
     years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
 else:
     years = []
-
 years_opts = ["All"] + [int(y) for y in years]
-default_index = len(years_opts) - 1 if years_opts else 0
-
-selected_year = st.sidebar.selectbox(
-    "Year",
-    options=years_opts,
-    index=default_index,
-    key="year_select_linechart"
-)
-
+selected_year = st.sidebar.selectbox("Year", options=years_opts, index=len(years_opts)-1, key="line_year_select")
 year_filter = None if selected_year == "All" else int(selected_year)
 
-# Render the line chart
 chart_container = st.container()
-monthly_trend_line(cleaned_df, container=chart_container, year=year_filter)
+monthly_trend_line(cleaned_df, container=chart_container, year=year_filter, currency_symbol="₹")
