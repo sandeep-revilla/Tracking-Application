@@ -16,7 +16,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from cleaning import clean_history_transactions
-from charts import daily_trend_line
+
 
 
 st.set_page_config(page_title="Google Sheet Connector", layout="wide")
@@ -191,12 +191,32 @@ colA, colB = st.columns([1,3])
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
 
-chart_container = st.container()
-st.subheader("📈 Monthly Trend (Aggregated)")
+from charts import daily_spend_line_chart
 
 
-st.divider()
+import pandas as pd
 
-st.subheader("📅 Daily Debit vs Credit Trend")
-from charts import daily_trend_line
-daily_trend_line(cleaned_df, container=chart_container, currency_symbol="₹")
+# Create a daily spend summary (example)
+df_debit = cleaned_df[cleaned_df['Type'].str.lower() == 'debit']
+daily_spend = (
+    df_debit.groupby(df_debit['DateTime'].dt.date)['Amount']
+    .sum()
+    .reset_index()
+)
+daily_spend.columns = ['Date', 'Total_Spent']
+
+# Optionally, also calculate daily credit
+df_credit = cleaned_df[cleaned_df['Type'].str.lower() == 'credit']
+daily_credit = (
+    df_credit.groupby(df_credit['DateTime'].dt.date)['Amount']
+    .sum()
+    .reset_index()
+)
+daily_credit.columns = ['Date', 'Total_Credit']
+
+# Merge both for plotting
+merged = pd.merge(daily_spend, daily_credit, on='Date', how='outer').fillna(0)
+
+# Call your chart function from charts.py
+st.subheader("📊 Daily Spending and Credit Trend")
+daily_spend_line_chart(merged, debit_col='Total_Spent', credit_col='Total_Credit')
