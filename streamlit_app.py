@@ -175,4 +175,4 @@ fig.update_layout(
     template='plotly_white'
 )
 
-fig.show()
+st.plotly_chart(fig, use_container_width=True)
