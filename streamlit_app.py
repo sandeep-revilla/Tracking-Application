@@ -190,14 +190,23 @@ colA, colB = st.columns([1,3])
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
 # Year selector (add after you have cleaned_df)
-years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
+# build year options safely
+if "DateTime" in cleaned_df.columns and not cleaned_df["DateTime"].dropna().empty:
+    years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
+else:
+    years = []
+
 years_opts = ["All"] + [int(y) for y in years]
-selected_year = st.sidebar.selectbox("Year", options=years_opts, index=len(years_opts)-1)
+default_index = len(years_opts) - 1 if years_opts else 0
+selected_year = st.sidebar.selectbox("Year", options=years_opts, index=default_index)
 
 year_filter = None if selected_year == "All" else int(selected_year)
 
-# render chart (monthly trend)
+# render chart (monthly trend) — use a single container and single call
 chart_container = st.container()
-monthly_trend(cleaned_df, container=chart_container, year=year_filter, show_debit_credit=True)
-chart_container = st.container()
-monthly_trend(cleaned_df, container=chart_container, show_debug=False)
+monthly_trend(
+    cleaned_df,
+    container=chart_container,
+    year=year_filter,
+    show_debit_credit=True  # draws separate Debit and Credit lines
+)
