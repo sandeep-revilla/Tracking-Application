@@ -191,12 +191,29 @@ colA, colB = st.columns([1,3])
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
 
-# ---------- Amount diagnostics and optional rescale ----------
+# ---------- Year selector, Amount diagnostics and optional rescale (fixed) ----------
 import numpy as np
 import streamlit as st
-from charts import monthly_trend_line  # ensure function available
+from charts import monthly_trend_line  # ensure charts.py has this function
 
-# Safety: work on a copy so original cleaned_df isn't mutated unexpectedly
+# --- Year selector (define year_filter BEFORE diagnostics) ---
+if "DateTime" in cleaned_df.columns and not cleaned_df["DateTime"].dropna().empty:
+    years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
+else:
+    years = []
+
+years_opts = ["All"] + [int(y) for y in years]
+default_index = len(years_opts) - 1 if years_opts else 0
+
+selected_year = st.sidebar.selectbox(
+    "Year",
+    options=years_opts,
+    index=default_index,
+    key="line_year_select_fixed"
+)
+year_filter = None if selected_year == "All" else int(selected_year)
+
+# Safety: work on a copy so original cleaned_df isn't mutated
 _debug_df = cleaned_df.copy()
 
 # 1) quick diagnostics
@@ -212,23 +229,30 @@ except Exception as e:
     st.error(f"Diagnostics failed: {e}")
 
 # 2) Detect suspicious tiny-scale amounts (heuristic)
-# We'll determine if the absolute maximum is <= 1 (i.e., values 0..1) which suggests scaling/percent or paise/rupee mismatch.
-max_abs = np.nanmax(np.abs(_debug_df["Amount"].astype(float))) if "Amount" in _debug_df.columns else 0
-min_abs = np.nanmin(np.abs(_debug_df["Amount"].astype(float))) if "Amount" in _debug_df.columns else 0
+max_abs = None
+try:
+    max_abs = float(np.nanmax(np.abs(_debug_df["Amount"].astype(float))))
+    min_abs = float(np.nanmin(np.abs(_debug_df["Amount"].astype(float))))
+except Exception:
+    max_abs = None
+    min_abs = None
 
-st.info(f"Observed amount range: min={min_abs:.6g}, max={max_abs:.6g}")
+if max_abs is not None:
+    st.info(f"Observed amount range: min={min_abs}, max={max_abs}")
+else:
+    st.info("Could not compute amount range (check Amount column)")
 
 auto_rescale = False
 rescale_factor = 1
 
-if max_abs > 0 and max_abs <= 1.0:
+if max_abs is not None and max_abs > 0 and max_abs <= 1.0:
     st.warning("Amounts are all ≤ 1.0 — they look like fractional values (0–1).")
     # Offer recommended factor choices
     choice = st.radio(
         "Auto-rescale amounts by:",
         options=["Do not rescale", "×100", "×1000", "Custom factor"],
         index=1,
-        key="rescale_choice"
+        key="rescale_choice_fixed"
     )
     if choice == "×100":
         auto_rescale = True
@@ -237,17 +261,16 @@ if max_abs > 0 and max_abs <= 1.0:
         auto_rescale = True
         rescale_factor = 1000
     elif choice == "Custom factor":
-        f = st.number_input("Enter factor (e.g. 100, 1000)", value=100, step=1, key="custom_rescale")
+        f = st.number_input("Enter factor (e.g. 100, 1000)", value=100, step=1, key="custom_rescale_fixed")
         if f != 1:
-            auto_rescale = st.checkbox("Apply custom rescale", value=False, key="apply_custom")
+            auto_rescale = st.checkbox("Apply custom rescale", value=False, key="apply_custom_fixed")
             rescale_factor = float(f) if auto_rescale else 1.0
     else:
         auto_rescale = False
 
-elif max_abs > 1 and max_abs < 100: 
-    # mid-range amounts — maybe they are in hundreds, show info
+elif max_abs is not None and max_abs > 1 and max_abs < 100:
     st.info("Amounts look small but >1. If you expect larger currency amounts, consider rescaling.")
-    if st.checkbox("Force rescale ×100 (use only if you expect paise->rupee or cents->unit conversion)", key="force100"):
+    if st.checkbox("Force rescale ×100 (use only if you expect paise->rupee or cents->unit conversion)", key="force100_fixed"):
         auto_rescale = True
         rescale_factor = 100
 
@@ -269,11 +292,10 @@ try:
 except Exception:
     pass
 
-# 5) Render the line chart using the chosen dataset
+# 5) Render the line chart using the chosen dataset and year_filter
 chart_container = st.container()
 monthly_trend_line(_df_for_chart, container=chart_container, year=year_filter, currency_symbol="₹")
 # ------------------------------------------------------------------
-
 
 if "DateTime" in cleaned_df.columns and not cleaned_df["DateTime"].dropna().empty:
     years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
