@@ -1,10 +1,7 @@
 # streamlit_app.py
 """
-Streamlit helper: connect to a private Google Sheet via service account (st.secrets or JSON file),
-safely convert sheet values to a pandas DataFrame (handles uneven rows and missing header),
-show preview and provide raw CSV download.
-
-Purpose: CONNECTION ONLY (no cleaning, no charts).
+Streamlit helper: connect to a private Google Sheet via service account,
+convert to pandas DataFrame, and show a Plotly line chart (no cleaning logic here).
 """
 
 import streamlit as st
@@ -15,18 +12,24 @@ from typing import List, Tuple, Optional, Any, Dict
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from cleaning import clean_history_transactions
+import plotly.express as px
 
-
-
+# ---------------- Streamlit Page Setup ----------------
 st.set_page_config(page_title="Google Sheet Connector", layout="wide")
-st.title("🔐 Google Sheet Connector — (Connection Only)")
+st.title("🔐 Google Sheet Connector — (Connection + Chart)")
 
 # ---------------- Sidebar Inputs ----------------
-SHEET_ID = st.sidebar.text_input("Google Sheet ID (between /d/ and /edit)", value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk")
+SHEET_ID = st.sidebar.text_input(
+    "Google Sheet ID (between /d/ and /edit)",
+    value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk",
+)
 RANGE = st.sidebar.text_input("Range or Sheet Name", value="History Transactions")
-st.sidebar.caption("Provide your Service Account JSON via st.secrets['gcp_service_account'] or as a local file below.")
-CREDS_FILE = st.sidebar.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
+st.sidebar.caption(
+    "Provide your Service Account JSON via st.secrets['gcp_service_account'] or as a local file below."
+)
+CREDS_FILE = st.sidebar.text_input(
+    "Service Account JSON File (optional)", value="creds/service_account.json"
+)
 
 if st.sidebar.button("Refresh Now"):
     st.experimental_rerun()
@@ -43,9 +46,9 @@ def parse_service_account_secret(raw: Any) -> Dict:
         return json.loads(s)
     except Exception:
         try:
-            return json.loads(s.replace('\\n', '\n'))
+            return json.loads(s.replace("\\n", "\n"))
         except Exception:
-            return json.loads(s.replace('\n', '\\n'))
+            return json.loads(s.replace("\n", "\\n"))
 
 # ---------------- Sheets Client Builders ----------------
 @st.cache_data(ttl=300)
@@ -138,85 +141,45 @@ with st.spinner("🔄 Fetching data from Google Sheets..."):
     except Exception as e:
         st.error(f"❌ Failed to read Google Sheet: {e}")
         st.stop()
+
 if df.empty:
     st.warning("⚠️ No data returned. Check the sheet name/range and ensure the service account has viewer access.")
     st.stop()
 
-# ---------- Clean the raw DataFrame and show cleaned result ----------
-# cached wrapper for cleaning
-@st.cache_data(ttl=300)
-def _clean_cached(df_raw):
-    # assumes clean_history_transactions is already imported from cleaning.py
-    return clean_history_transactions(df_raw)
+st.success(f"✅ Successfully loaded data from Google Sheet — {len(df):,} rows read.")
 
-try:
-    with st.spinner("Cleaning data..."):
-        cleaned_df = _clean_cached(df)
-except Exception as e:
-    st.error(f"Cleaning failed: {e}")
-    st.stop()
-# ---------- Show counts, KPIs, download and charts (no tables) ----------
+# ---------- Optional: Convert types safely ----------
+if "Date" in df.columns:
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-# show how many rows were read from the sheet (raw)
-rows_read = len(df)
-st.success(f"✅ Successfully loaded data from Google Sheet — {rows_read:,} rows read.")
+if "Total_Spent" in df.columns:
+    df["Total_Spent"] = pd.to_numeric(df["Total_Spent"], errors="coerce")
 
-# aggregated KPIs (displayed prominently)
+# ---------- Build Plotly Line Chart (Debit Only) ----------
+if {"Date", "Total_Spent"}.issubset(df.columns):
+    st.subheader("💸 Daily Spending Trend (Debit Only)")
 
+    fig = px.line(
+        df,
+        x="Date",
+        y="Total_Spent",
+        title="📈 Daily Debit Spending Over Time",
+        markers=True,
+        line_shape="spline",
+    )
 
-# safe computations (guard against missing columns)
-def safe_sum_by_type(df_in, match_str):
-    try:
-        return df_in.loc[df_in["Type"].str.lower().str.contains(match_str, na=False), "Amount"].sum()
-    except Exception:
-        return 0.0
+    fig.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Total Spent (₹)",
+        template="plotly_white",
+        showlegend=False,
+    )
 
-total_debit = safe_sum_by_type(cleaned_df, "debit")
-total_credit = safe_sum_by_type(cleaned_df, "credit")
+    st.plotly_chart(fig, use_container_width=True)
 
-try:
-    suspicious_count = int(cleaned_df["Suspicious"].sum())
-except Exception:
-    suspicious_count = 0
+else:
+    st.warning("⚠️ Data does not have required columns: Date, Total_Spent")
 
-# show KPIs in a single row
-col1, col2, col3, col4 = st.columns([1,1,1,1])
-col1.metric("Total Debit", f"{total_debit:,.2f}")
-col2.metric("Total Credit", f"{total_credit:,.2f}")
-col3.metric("Suspicious", f"{suspicious_count:,}")
-
-# small secondary info row: show rows read from sheet (raw) and column list
-colA, colB = st.columns([1,3])
-# Download cleaned CSV (keep)
-clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
-
-from charts import daily_spend_line_chart
-
-
-import pandas as pd
-
-# Create a daily spend summary (example)
-df_debit = cleaned_df[cleaned_df['Type'].str.lower() == 'debit']
-daily_spend = (
-    df_debit.groupby(df_debit['DateTime'].dt.date)['Amount']
-    .sum()
-    .reset_index()
-)
-daily_spend.columns = ['Date', 'Total_Spent']
-
-# Optionally, also calculate daily credit
-df_credit = cleaned_df[cleaned_df['Type'].str.lower() == 'credit']
-daily_credit = (
-    df_credit.groupby(df_credit['DateTime'].dt.date)['Amount']
-    .sum()
-    .reset_index()
-)
-daily_credit.columns = ['Date', 'Total_Credit']
-
-# Merge both for plotting
-merged = pd.merge(daily_spend, daily_credit, on='Date', how='outer').fillna(0)
-
-# Call your chart function from charts.py
-st.subheader("📊 Daily Spending and Credit Trend")
-daily_spend_line_chart(merged, debit_col='Total_Spent', credit_col='Total_Credit')
+# Optional: show preview
+with st.expander("🔍 Preview Raw Data"):
+    st.dataframe(df.head(10))
