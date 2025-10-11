@@ -16,6 +16,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from cleaning import clean_history_transactions
+from charts import monthly_trend_bar
 
 
 st.set_page_config(page_title="Google Sheet Connector", layout="wide")
@@ -190,18 +191,31 @@ colA, colB = st.columns([1,3])
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
 
-from charts import monthly_trend_bar
+# build year options
+if "DateTime" in cleaned_df.columns and not cleaned_df["DateTime"].dropna().empty:
+    years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
+else:
+    years = []
 
-# year selector (same as before)
-years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
 years_opts = ["All"] + [int(y) for y in years]
-selected_year = st.sidebar.selectbox("Year", options=years_opts, index=len(years_opts)-1)
+default_index = len(years_opts) - 1 if years_opts else 0
+
+selected_year = st.sidebar.selectbox(
+    "Year",
+    options=years_opts,
+    index=default_index,
+    key="monthly_year_select"   # unique key to avoid duplicate widget errors
+)
+
 year_filter = None if selected_year == "All" else int(selected_year)
+
+# stacked toggle
+stacked_toggle = st.sidebar.checkbox("Stack bars", value=True, key="stacked_toggle")
 
 chart_container = st.container()
 monthly_trend_bar(
     cleaned_df,
     container=chart_container,
     year=year_filter,
-    stacked=True   # or False for grouped bars
+    stacked=stacked_toggle
 )
