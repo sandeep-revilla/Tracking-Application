@@ -180,15 +180,25 @@ except Exception:
 
 # show KPIs in a single row
 col1, col2, col3, col4 = st.columns([1,1,1,1])
-col2.metric("Total Debit", f"{total_debit:,.2f}")
-col3.metric("Total Credit", f"{total_credit:,.2f}")
-col4.metric("Suspicious", f"{suspicious_count:,}")
+col1.metric("Total Debit", f"{total_debit:,.2f}")
+col2.metric("Total Credit", f"{total_credit:,.2f}")
+col3.metric("Suspicious", f"{suspicious_count:,}")
 
 # small secondary info row: show rows read from sheet (raw) and column list
 colA, colB = st.columns([1,3])
 # Download cleaned CSV (keep)
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
+# Year selector (add after you have cleaned_df)
+years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
+years_opts = ["All"] + [int(y) for y in years]
+selected_year = st.sidebar.selectbox("Year", options=years_opts, index=len(years_opts)-1)
 
+year_filter = None if selected_year == "All" else int(selected_year)
+
+# render chart (monthly trend)
+chart_container = st.container()
+from charts import monthly_trend  # ensure charts.py has this function
+monthly_trend(cleaned_df, container=chart_container, year=year_filter, show_debit_credit=True)
 chart_container = st.container()
 monthly_trend(cleaned_df, container=chart_container, show_debug=False)
