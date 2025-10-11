@@ -1,6 +1,6 @@
 # streamlit_app.py
 """
-Streamlit App: Connect to Google Sheet and show interactive Plotly Debit Chart (Zigzag Daily)
+Streamlit App: Connect to Google Sheet and show interactive Plotly Debit Chart (True Zigzag)
 """
 
 import streamlit as st
@@ -8,7 +8,6 @@ import pandas as pd
 import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 import plotly.express as px
 
 # ---------------- PAGE SETUP ----------------
@@ -96,16 +95,13 @@ df_debit = df[df["Type"].str.lower().str.strip() == "debit"]
 df_debit["Amount"] = df_debit["Amount"].abs()
 df_debit["Date"] = df_debit["DateTime"].dt.date
 
-# ✅ Daily totals (non-cumulative)
+# ✅ True daily total (not cumulative)
 daily_spend = (
     df_debit.groupby("Date", as_index=False)["Amount"]
     .sum()
     .rename(columns={"Amount": "Total_Spent"})
     .sort_values("Date")
 )
-
-# Add rolling average for trend
-daily_spend["Rolling_Avg"] = daily_spend["Total_Spent"].rolling(window=3, min_periods=1).mean()
 
 # ---------------- INTERACTIVE FILTER ----------------
 min_date, max_date = daily_spend["Date"].min(), daily_spend["Date"].max()
@@ -117,29 +113,20 @@ if len(date_range) == 2:
         (daily_spend["Date"] >= start) & (daily_spend["Date"] <= end)
     ]
 
-# ---------------- PLOTLY CHART ----------------
+# ---------------- PLOTLY CHART (ZIGZAG) ----------------
 fig = px.line(
     daily_spend,
     x="Date",
     y="Total_Spent",
-    title="📈 Daily Debit Spending (Zigzag, Non-Cumulative)",
+    title="📈 Daily Debit Spending Over Time (Zigzag, True Daily)",
     markers=True,
-    line_shape="linear",  # 🔹 Use linear to preserve real zigzags
+    line_shape="linear",  # keep zigzag — no smoothing
 )
 
-# Add rolling average for smooth trend
-fig.add_scatter(
-    x=daily_spend["Date"],
-    y=daily_spend["Rolling_Avg"],
-    mode="lines",
-    name="3-Day Avg",
-    line=dict(width=2, dash="dot", color="orange"),
-)
-
-fig.update_traces(line=dict(width=2, color="#1f77b4"))
+fig.update_traces(line=dict(width=2, color="#0074D9"))
 fig.update_layout(
     xaxis_title="Date",
-    yaxis_title="Daily Spend (₹)",
+    yaxis_title="Total Spent (₹)",
     hovermode="x unified",
     template="plotly_white",
     height=600,
