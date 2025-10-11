@@ -2,9 +2,9 @@
 """
 Chart utilities for spending dashboard.
 
-Exported:
-- monthly_trend_bar(df, container, date_col, amount_col, type_col, year, stacked)
-- AVAILABLE_CHARTS (list of names)
+Exports:
+- monthly_trend_line(df, container, date_col, amount_col, type_col, year)
+- AVAILABLE_CHARTS
 """
 
 from typing import Optional, List
@@ -13,146 +13,135 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 
-AVAILABLE_CHARTS: List[str] = ["Monthly Spending (Bar)"]
+AVAILABLE_CHARTS: List[str] = ["Monthly Spending (Line)"]
 
-def monthly_trend_bar(
+def monthly_trend_line(
     df: pd.DataFrame,
     container=None,
     date_col: str = "DateTime",
     amount_col: str = "Amount",
     type_col: str = "Type",
     year: Optional[int] = None,
-    stacked: bool = True
 ) -> go.Figure:
     """
-    Monthly Spending Bar Chart (Debit & Credit).
-    - df: cleaned dataframe (DateTime, Amount, Type recommended)
-    - container: Streamlit container (optional) to render into
-    - date_col: name of datetime column
-    - amount_col: name of numeric amount column
-    - type_col: name of transaction type column (expects values containing 'debit' or 'credit')
-    - year: if provided (int), filters data to that calendar year
-    - stacked: True => stacked bars; False => grouped bars
-    Returns Plotly Figure and renders to container if provided.
+    Monthly Spending Line Chart (Debit & Credit).
+    Shows monthly total debit and credit over time.
+    - year: optional filter (int)
+    Returns Plotly Figure and renders to Streamlit container if provided.
     """
+
     # Defensive checks
     if date_col not in df.columns or amount_col not in df.columns:
-        fig = px.bar(title="Monthly Spending — missing columns (DateTime/Amount required)")
-        if container is not None:
+        fig = px.line(title="Monthly Spending — missing columns (DateTime/Amount required)")
+        if container:
             container.plotly_chart(fig, use_container_width=True)
         return fig
 
     tmp = df.copy()
 
-    # Parse and validate dates
+    # Ensure valid datetime
     tmp[date_col] = pd.to_datetime(tmp[date_col], errors="coerce")
     tmp = tmp[tmp[date_col].notna()].copy()
     if tmp.empty:
-        fig = px.bar(title="Monthly Spending — no valid dates")
-        if container is not None:
+        fig = px.line(title="Monthly Spending — no valid dates")
+        if container:
             container.plotly_chart(fig, use_container_width=True)
         return fig
 
-    # Apply year filter if requested
+    # Filter by year if selected
     if year is not None:
         tmp = tmp[tmp[date_col].dt.year == int(year)]
         if tmp.empty:
-            fig = px.bar(title=f"Monthly Spending — no data for {year}")
-            if container is not None:
+            fig = px.line(title=f"Monthly Spending — no data for {year}")
+            if container:
                 container.plotly_chart(fig, use_container_width=True)
             return fig
 
-    # Ensure amounts are numeric
+    # Convert Amount to numeric
     tmp[amount_col] = pd.to_numeric(tmp[amount_col], errors="coerce")
     tmp = tmp[tmp[amount_col].notna()].copy()
     if tmp.empty:
-        fig = px.bar(title="Monthly Spending — no numeric amounts")
-        if container is not None:
+        fig = px.line(title="Monthly Spending — no numeric amounts")
+        if container:
             container.plotly_chart(fig, use_container_width=True)
         return fig
 
-    # Create MonthStart for grouping (first day of month)
+    # MonthStart (first day of month)
     tmp["MonthStart"] = tmp[date_col].dt.to_period("M").dt.to_timestamp()
 
-    # Aggregate Debit & Credit explicitly (case-insensitive)
+    # Aggregate monthly Debit and Credit totals
     if type_col in tmp.columns:
-        debit_series = (
+        debit = (
             tmp[tmp[type_col].astype(str).str.contains("debit", case=False, na=False)]
             .groupby("MonthStart")[amount_col].sum()
         )
-        credit_series = (
+        credit = (
             tmp[tmp[type_col].astype(str).str.contains("credit", case=False, na=False)]
             .groupby("MonthStart")[amount_col].sum()
         )
     else:
-        # fallback if type_col not present — treat everything as Debit
-        debit_series = tmp.groupby("MonthStart")[amount_col].sum()
-        credit_series = pd.Series(dtype=float)
+        debit = tmp.groupby("MonthStart")[amount_col].sum()
+        credit = pd.Series(dtype=float)
 
-    # Build safe start/end from actual available months (avoid Timestamp.max/min bug)
-    candidates = []
-    if not debit_series.empty:
-        candidates.append(debit_series.index.min())
-    if not credit_series.empty:
-        candidates.append(credit_series.index.min())
+    # Determine start and end months safely
+    all_dates = []
+    if not debit.empty:
+        all_dates.append(debit.index.min())
+        all_dates.append(debit.index.max())
+    if not credit.empty:
+        all_dates.append(credit.index.min())
+        all_dates.append(credit.index.max())
     if tmp["MonthStart"].notna().any():
-        candidates.append(tmp["MonthStart"].min())
-    candidates = [c for c in candidates if pd.notna(c)]
-    if not candidates:
-        fig = px.bar(title="Monthly Spending — no month data")
-        if container is not None:
+        all_dates.append(tmp["MonthStart"].min())
+        all_dates.append(tmp["MonthStart"].max())
+    all_dates = [d for d in all_dates if pd.notna(d)]
+    if not all_dates:
+        fig = px.line(title="Monthly Spending — no month data")
+        if container:
             container.plotly_chart(fig, use_container_width=True)
         return fig
-    start = min(candidates)
+    start, end = min(all_dates), max(all_dates)
 
-    candidates_end = []
-    if not debit_series.empty:
-        candidates_end.append(debit_series.index.max())
-    if not credit_series.empty:
-        candidates_end.append(credit_series.index.max())
-    if tmp["MonthStart"].notna().any():
-        candidates_end.append(tmp["MonthStart"].max())
-    candidates_end = [c for c in candidates_end if pd.notna(c)]
-    end = max(candidates_end) if candidates_end else start
-
-    # Create full monthly index and reindex series (fill missing months with zeros)
+    # Create continuous monthly range (fill missing months with 0)
     full_index = pd.date_range(start=start, end=end, freq="MS")
-    debit = debit_series.reindex(full_index, fill_value=0).astype(float)
-    credit = credit_series.reindex(full_index, fill_value=0).astype(float)
+    debit = debit.reindex(full_index, fill_value=0)
+    credit = credit.reindex(full_index, fill_value=0)
 
-    # Build pivot dataframe used for plotting
+    # Build dataframe
     pivot_df = pd.DataFrame({
         "MonthStart": full_index,
         "Debit": debit.values,
-        "Credit": credit.values
+        "Credit": credit.values,
     })
-    pivot_df["TotalAmount"] = pivot_df[["Debit", "Credit"]].sum(axis=1)
+    pivot_df["Total"] = pivot_df["Debit"] + pivot_df["Credit"]
 
-    # Build Plotly figure with two bar traces
+    # Build line chart
     fig = go.Figure()
-    fig.add_trace(go.Bar(
+
+    fig.add_trace(go.Scatter(
         x=pivot_df["MonthStart"],
         y=pivot_df["Debit"],
+        mode="lines+markers",
         name="Debit",
-        customdata=np.stack([pivot_df["TotalAmount"].values], axis=1),
-        hovertemplate="<b>%{x|%b %Y}</b><br>Type: Debit<br>Amount: %{y:,.2f}<br>Total month: %{customdata[0]:,.2f}<extra></extra>"
-    ))
-    fig.add_trace(go.Bar(
-        x=pivot_df["MonthStart"],
-        y=pivot_df["Credit"],
-        name="Credit",
-        customdata=np.stack([pivot_df["TotalAmount"].values], axis=1),
-        hovertemplate="<b>%{x|%b %Y}</b><br>Type: Credit<br>Amount: %{y:,.2f}<br>Total month: %{customdata[0]:,.2f}<extra></extra>"
+        line=dict(width=2),
+        hovertemplate="<b>%{x|%b %Y}</b><br>Type: Debit<br>Amount: %{y:,.2f}<extra></extra>"
     ))
 
-    # Layout and formatting
-    # Reduce tick density based on number of months (max ~8 visible ticks)
-    tick_step = max(1, int(len(pivot_df) / 8)) if len(pivot_df) > 0 else 1
+    fig.add_trace(go.Scatter(
+        x=pivot_df["MonthStart"],
+        y=pivot_df["Credit"],
+        mode="lines+markers",
+        name="Credit",
+        line=dict(width=2, dash="dot"),
+        hovertemplate="<b>%{x|%b %Y}</b><br>Type: Credit<br>Amount: %{y:,.2f}<extra></extra>"
+    ))
+
+    # Format layout
+    tick_step = max(1, int(len(pivot_df) / 8))
     tickvals = pivot_df["MonthStart"].iloc[::tick_step].tolist() if len(pivot_df) > 0 else None
 
     fig.update_layout(
-        barmode="stack" if stacked else "group",
-        title="Monthly Spending (Debit vs Credit)",
+        title="Monthly Spending Trend (Debit vs Credit)",
         xaxis=dict(
             title="Month",
             type="date",
@@ -166,7 +155,7 @@ def monthly_trend_bar(
         margin=dict(l=60, r=20, t=60, b=60)
     )
 
-    if container is not None:
+    if container:
         container.plotly_chart(fig, use_container_width=True)
 
     return fig
