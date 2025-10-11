@@ -147,7 +147,7 @@ if df.empty:
     st.stop()
 
 st.success(f"✅ Successfully loaded data from Google Sheet — {len(df):,} rows read.")
-
+cleaned_df = df
 import pandas as pd
 import plotly.express as px
 import streamlit as st
