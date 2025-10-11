@@ -6,7 +6,6 @@ Streamlit App: Connect to Google Sheet (via Service Account) and show a Debit-On
 import streamlit as st
 import pandas as pd
 import json
-import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -73,8 +72,7 @@ def read_google_sheet(spreadsheet_id, range_name, creds_info=None, creds_file=No
     if not values:
         return pd.DataFrame()
 
-    # Normalize header + rows
-    header = values[0]
+    header = [h.strip() for h in values[0]]
     rows = values[1:]
     df = pd.DataFrame(rows, columns=header)
     return df
@@ -102,42 +100,64 @@ if df.empty:
 st.success(f"✅ Loaded {len(df):,} rows from Google Sheet.")
 
 # ---------------- CLEAN DATA ----------------
-required_cols = {"DateTime", "Type", "Amount"}
-if not required_cols.issubset(df.columns):
+# Normalize column names
+df.columns = df.columns.str.strip().str.title()
+
+# Check required columns (case-insensitive)
+required_cols = {"Datetime", "Type", "Amount"}
+if not required_cols.issubset(set(df.columns)):
     st.error(f"⚠️ Missing required columns: {required_cols - set(df.columns)}")
     st.stop()
 
-# Convert types safely
-df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
-df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce')
-df = df.dropna(subset=['DateTime', 'Amount'])
+# Convert Amount safely (handles commas and text)
+df["Amount"] = (
+    df["Amount"]
+    .astype(str)
+    .str.replace(",", "", regex=False)
+    .str.extract(r"(\d+\.?\d*)")[0]
+    .astype(float)
+)
+
+# Parse DateTime
+df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
+
+# Drop invalid rows
+df = df.dropna(subset=["Datetime", "Amount"])
 
 # Filter only debit transactions
-df_debit = df[df['Type'].str.lower() == 'debit']
+df_debit = df[df["Type"].str.lower() == "debit"].copy()
+
+if df_debit.empty:
+    st.warning("⚠️ No debit transactions found.")
+    st.stop()
 
 # Group by date and sum
-daily_spend = df_debit.groupby(df_debit['DateTime'].dt.date)['Amount'].sum().reset_index()
-daily_spend.columns = ['Date', 'Total_Spent']
-daily_spend = daily_spend.sort_values('Date')
+daily_spend = (
+    df_debit.groupby(df_debit["Datetime"].dt.date)["Amount"]
+    .sum()
+    .reset_index()
+    .rename(columns={"Datetime": "Date", "Amount": "Total_Spent"})
+    .sort_values("Date")
+)
 
 # ---------------- PLOT ----------------
 fig = px.line(
     daily_spend,
-    x='Date',
-    y='Total_Spent',
-    title='💸 Daily Debit Spending Over Time',
+    x="Date",
+    y="Total_Spent",
+    title="💸 Daily Debit Spending Over Time",
     markers=True,
-    line_shape='spline'
+    line_shape="linear"
 )
 
 fig.update_layout(
-    xaxis_title='Date',
-    yaxis_title='Total Spent (₹)',
-    template='plotly_white'
+    xaxis_title="Date",
+    yaxis_title="Total Spent (₹)",
+    template="plotly_white"
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# Optional: preview data
+# ---------------- SHOW RAW DATA ----------------
 with st.expander("🔍 View Raw Debit Data"):
-    st.dataframe(df_debit.head(50))
+    st.dataframe(df_debit.reset_index(drop=True))
