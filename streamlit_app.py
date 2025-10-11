@@ -198,7 +198,6 @@ year_filter = None if selected_year == "All" else int(selected_year)
 
 # render chart (monthly trend)
 chart_container = st.container()
-from charts import monthly_trend  # ensure charts.py has this function
 monthly_trend(cleaned_df, container=chart_container, year=year_filter, show_debit_credit=True)
 chart_container = st.container()
 monthly_trend(cleaned_df, container=chart_container, show_debug=False)
