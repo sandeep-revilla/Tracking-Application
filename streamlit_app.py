@@ -178,39 +178,69 @@ if daily_spend.empty:
 
 # ---------------- Plotly line (true zigzag) ----------------
 # Ensure daily_spend is sorted by Date
-daily_spend = daily_spend.sort_values("Date")
+# ---------- Diagnostics & Fixed Plotting (paste here) ----------
+# daily_spend should already exist and be sorted by Date
+daily_spend = daily_spend.sort_values("Date").reset_index(drop=True)
 
-# Create the Plotly line chart (straight line segments)
+# Quick diagnostics printed to Streamlit
+st.subheader("Diagnostics: daily_spend")
+st.write("Rows:", len(daily_spend))
+st.write(daily_spend.head(12))            # sample rows
+st.write(daily_spend.describe())          # numeric summary
+
+# Show min, max, small table of top N largest values
+mx = daily_spend["Total_Spent"].max()
+mn = daily_spend["Total_Spent"].min()
+st.write(f"Min: {mn:,}  Max: {mx:,}")
+
+# Show day-to-day differences to confirm zigzag
+daily_spend["diff"] = daily_spend["Total_Spent"].diff()
+st.write("First 10 diffs (positive = up, negative = down):")
+st.write(daily_spend[["Date", "Total_Spent", "diff"]].head(15))
+
+# If you want to zoom the y-axis to make small variations visible, choose a multiplier:
+auto_min = float(daily_spend["Total_Spent"].min())
+auto_max = float(daily_spend["Total_Spent"].max())
+# Let user optionally set a zoom factor
+zoom = st.sidebar.slider("Y-axis zoom factor (smaller shows more detail)", min_value=0.1, max_value=2.0, value=1.0, step=0.1)
+ymin = max(0, auto_min / zoom)
+ymax = auto_max / max(1e-6, zoom)  # prevent div by zero
+
+# PLOT A: scatter (raw points) — useful to verify exact positions
+st.subheader("Scatter of raw daily totals (verifies point positions)")
+fig_scatter = px.scatter(
+    daily_spend,
+    x="Date",
+    y="Total_Spent",
+    title="Raw daily points (no connecting lines)",
+    labels={"Total_Spent": "Daily Spent (₹)"},
+    render_mode="svg"
+)
+fig_scatter.update_traces(marker=dict(size=8, color="darkblue"))
+fig_scatter.update_layout(yaxis=dict(tickformat=",.0f", range=[ymin, ymax]))
+st.plotly_chart(fig_scatter, use_container_width=True)
+
+# PLOT B: line + markers (true zigzag)
+st.subheader("Line + markers (linear connections — true zigzag)")
 fig = px.line(
     daily_spend,
     x="Date",
     y="Total_Spent",
-    title="📈 Daily Debit Spending (True Daily Totals — Zigzag)",
-    labels={"Total_Spent": "Daily Spent (₹)", "Date": "Date"},
-    markers=True,
-    line_shape="linear",     # linear segments between points (no smoothing)
-    render_mode="svg",       # SVG for crisp lines
+    title="Daily Debit Spending (linear — lines+markers)",
+    labels={"Total_Spent": "Daily Spent (₹)"},
+    line_shape="linear",    # keep straight segments
+    render_mode="svg"
 )
-
-# Add markers to verify individual values and make line blue
 fig.update_traces(mode="lines+markers", line_color="blue", marker=dict(size=6))
-
+# Force y-axis to show actual numbers (no SI scaling), and optionally zoom:
 fig.update_layout(
+    yaxis=dict(tickformat=",.0f", range=[ymin, ymax]),
+    xaxis=dict(tickformat="%b %d\n%Y"),
     template="plotly_white",
     hovermode="x unified",
-    height=600,
-    xaxis=dict(title="Date", tickformat="%b %d\n%Y"),
-    yaxis=dict(title="Daily Spent (₹)", tickformat=","),
-    margin=dict(l=60, r=30, t=70, b=80),
 )
-
 st.plotly_chart(fig, use_container_width=True)
 
-# ---------------- Debug / data preview ----------------
-with st.expander("🔍 View Raw & Aggregated Data"):
-    st.subheader("Sample raw debit rows (first 50)")
-    st.dataframe(df_debit.head(50))
-    st.subheader("Daily aggregated totals")
-    st.dataframe(daily_spend.head(50))
-    st.write("dtypes:")
-    st.write(df_debit.dtypes)
+# If the line still looks monotonic, show the actual y values in hover by printing the list:
+with st.expander("Raw Total_Spent list (for debugging)"):
+    st.write(daily_spend[["Date", "Total_Spent"]].to_string(index=False))
