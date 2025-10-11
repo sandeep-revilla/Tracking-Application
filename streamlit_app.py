@@ -141,12 +141,48 @@ if df.empty:
     st.warning("⚠️ No data returned. Check the sheet name/range and ensure the service account has viewer access.")
     st.stop()
 
-# ---------------- UI Preview & Export ----------------
-st.subheader("✅ Loaded Data (Preview)")
-st.dataframe(df.head(100), use_container_width=True)
-st.caption(f"Rows loaded: {len(df)} | Columns: {', '.join(df.columns.astype(str))}")
+# ---------- Clean the raw DataFrame and show cleaned result ----------
+# cached wrapper for cleaning
+@st.cache_data(ttl=300)
+def _clean_cached(df_raw):
+    # assumes clean_history_transactions is already imported from cleaning.py
+    return clean_history_transactions(df_raw)
 
-csv_bytes = df.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download Raw CSV", data=csv_bytes, file_name="sheet_raw.csv", mime="text/csv")
+try:
+    with st.spinner("Cleaning data..."):
+        cleaned_df = _clean_cached(df)
+except Exception as e:
+    st.error(f"Cleaning failed: {e}")
+    st.stop()
 
-st.info("This app only connects and retrieves raw Google Sheet data. Use your cleaning and chart modules separately for processing.")
+st.subheader("Cleaned data (preview)")
+st.dataframe(cleaned_df.head(100), use_container_width=True)
+st.caption(f"Cleaned rows: {len(cleaned_df)} | Columns: {', '.join(cleaned_df.columns.astype(str))}")
+
+# Simple KPIs
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Rows (cleaned)", len(cleaned_df))
+
+# guard against missing columns
+try:
+    total_debit = cleaned_df.loc[cleaned_df["Type"].str.lower().str.contains("debit", na=False), "Amount"].sum()
+except Exception:
+    total_debit = 0.0
+try:
+    total_credit = cleaned_df.loc[cleaned_df["Type"].str.lower().str.contains("credit", na=False), "Amount"].sum()
+except Exception:
+    total_credit = 0.0
+try:
+    suspicious_count = int(cleaned_df["Suspicious"].sum())
+except Exception:
+    suspicious_count = 0
+
+col2.metric("Total Debit", f"{total_debit:,.2f}")
+col3.metric("Total Credit", f"{total_credit:,.2f}")
+col4.metric("Suspicious", suspicious_count)
+
+# Download cleaned CSV
+clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
+# --------------------------------------------------------------------
+
