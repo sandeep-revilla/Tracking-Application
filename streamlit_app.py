@@ -136,7 +136,8 @@ with st.spinner("🔄 Fetching data from Google Sheets..."):
     except Exception as e:
         st.error(f"❌ Failed to read Google Sheet: {e}")
         st.stop()
-
+# ✅ Show how many rows were read from the Google Sheet
+st.success(f"✅ Successfully loaded data from Google Sheet — {len(df):,} rows read.")
 if df.empty:
     st.warning("⚠️ No data returned. Check the sheet name/range and ensure the service account has viewer access.")
     st.stop()
