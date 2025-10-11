@@ -1,4 +1,4 @@
-# Replace monthly_trend_line in charts.py with this debug-friendly version
+# charts.py — final monthly_trend_line (force y-axis range & clean)
 from typing import Optional, List
 import pandas as pd
 import numpy as np
@@ -13,129 +13,112 @@ def monthly_trend_line(
     type_col: str = "Type",
     year: Optional[int] = None,
     currency_symbol: str = "₹",
-    show_debug_table: bool = True
 ) -> go.Figure:
     """
-    Robust monthly line chart with debug output.
-    - show_debug_table: if True, shows pivot_df in an expander for inspection.
+    Monthly Spending Line Chart (Debit & Credit).
+    Ensures amounts are cleaned, aggregates monthly, picks sensible tickformat and
+    forces y-axis range so labels reflect real amounts.
     """
 
-    # Basic checks
+    # 1. Basic validation
     if date_col not in df.columns or amount_col not in df.columns:
-        fig = px.line(title="Monthly Spending — missing columns (DateTime/Amount required)")
-        if container: container.plotly_chart(fig, use_container_width=True)
+        fig = px.line(title="Missing columns (DateTime and Amount required)")
+        if container:
+            container.plotly_chart(fig, use_container_width=True)
         return fig
 
     tmp = df.copy()
 
-    # 1) parse dates
+    # 2. Ensure datetime
     tmp[date_col] = pd.to_datetime(tmp[date_col], errors="coerce")
     tmp = tmp[tmp[date_col].notna()].copy()
     if tmp.empty:
-        fig = px.line(title="Monthly Spending — no valid dates")
-        if container: container.plotly_chart(fig, use_container_width=True)
+        fig = px.line(title="No valid dates")
+        if container:
+            container.plotly_chart(fig, use_container_width=True)
         return fig
 
-    # 2) optional year filter
+    # 3. Optional year filter
     if year is not None:
         tmp = tmp[tmp[date_col].dt.year == int(year)]
         if tmp.empty:
-            fig = px.line(title=f"Monthly Spending — no data for {year}")
-            if container: container.plotly_chart(fig, use_container_width=True)
+            fig = px.line(title=f"No data for year {year}")
+            if container:
+                container.plotly_chart(fig, use_container_width=True)
             return fig
 
-    # 3) try to clean amount strings (safe) and coerce
-    try:
-        tmp[amount_col] = (
-            tmp[amount_col]
-            .astype(str)
-            .str.replace(r"[^\d\.\-]", "", regex=True)
-            .replace({"": None})
-        )
-        tmp[amount_col] = pd.to_numeric(tmp[amount_col], errors="coerce")
-    except Exception:
-        tmp[amount_col] = pd.to_numeric(tmp[amount_col], errors="coerce")
-
+    # 4. Clean amount strings and coerce to numeric
+    tmp[amount_col] = (
+        tmp[amount_col].astype(str)
+        .str.replace(r"[^\d\.\-]", "", regex=True)
+        .replace({"": None})
+    )
+    tmp[amount_col] = pd.to_numeric(tmp[amount_col], errors="coerce")
     tmp = tmp[tmp[amount_col].notna()].copy()
     if tmp.empty:
-        fig = px.line(title="Monthly Spending — no numeric amounts")
-        if container: container.plotly_chart(fig, use_container_width=True)
+        fig = px.line(title="No numeric amounts")
+        if container:
+            container.plotly_chart(fig, use_container_width=True)
         return fig
 
-    # 4) MonthStart for grouping
+    # 5. MonthStart for grouping
     tmp["MonthStart"] = tmp[date_col].dt.to_period("M").dt.to_timestamp()
 
-    # 5) Aggregate debit & credit
+    # 6. Aggregate by month & type
     if type_col in tmp.columns:
-        debit_series = (
+        debit_s = (
             tmp[tmp[type_col].astype(str).str.contains("debit", case=False, na=False)]
             .groupby("MonthStart")[amount_col].sum()
         )
-        credit_series = (
+        credit_s = (
             tmp[tmp[type_col].astype(str).str.contains("credit", case=False, na=False)]
             .groupby("MonthStart")[amount_col].sum()
         )
     else:
-        debit_series = tmp.groupby("MonthStart")[amount_col].sum()
-        credit_series = pd.Series(dtype=float)
+        debit_s = tmp.groupby("MonthStart")[amount_col].sum()
+        credit_s = pd.Series(dtype=float)
 
-    # 6) build safe full_index range from actual series & tmp
+    # 7. Compute safe start/end based on available series
     candidates = []
-    if not debit_series.empty:
-        candidates.append(debit_series.index.min()); candidates.append(debit_series.index.max())
-    if not credit_series.empty:
-        candidates.append(credit_series.index.min()); candidates.append(credit_series.index.max())
+    if not debit_s.empty:
+        candidates += [debit_s.index.min(), debit_s.index.max()]
+    if not credit_s.empty:
+        candidates += [credit_s.index.min(), credit_s.index.max()]
     if tmp["MonthStart"].notna().any():
-        candidates.append(tmp["MonthStart"].min()); candidates.append(tmp["MonthStart"].max())
+        candidates += [tmp["MonthStart"].min(), tmp["MonthStart"].max()]
+
     candidates = [c for c in candidates if pd.notna(c)]
     if not candidates:
-        fig = px.line(title="Monthly Spending — no month data")
-        if container: container.plotly_chart(fig, use_container_width=True)
+        fig = px.line(title="No monthly data")
+        if container:
+            container.plotly_chart(fig, use_container_width=True)
         return fig
+
     start, end = min(candidates), max(candidates)
-
     full_index = pd.date_range(start=start, end=end, freq="MS")
-    debit = debit_series.reindex(full_index, fill_value=0).astype(float)
-    credit = credit_series.reindex(full_index, fill_value=0).astype(float)
 
-    pivot_df = pd.DataFrame({
-        "MonthStart": full_index,
-        "Debit": debit.values,
-        "Credit": credit.values
-    })
+    debit = debit_s.reindex(full_index, fill_value=0).astype(float)
+    credit = credit_s.reindex(full_index, fill_value=0).astype(float)
+
+    pivot_df = pd.DataFrame({"MonthStart": full_index, "Debit": debit.values, "Credit": credit.values})
     pivot_df["Total"] = pivot_df["Debit"] + pivot_df["Credit"]
 
-    # --- DEBUG: show pivot_df to verify the numbers being plotted ---
-    if show_debug_table and container is not None:
-        try:
-            with container.expander("Debug: aggregated monthly values (pivot_df)"):
-                # show small table and dtypes so you can confirm plotted values
-                st = None
-                try:
-                    # import streamlit lazily to avoid import when not using Streamlit
-                    import streamlit as _st
-                    st = _st
-                except Exception:
-                    st = None
-                # show head and summary
-                if st is not None:
-                    st.write(pivot_df.head(20))
-                    st.write("dtypes:", pivot_df.dtypes.to_dict())
-                    st.write("min/max totals:", float(pivot_df["Total"].min()), float(pivot_df["Total"].max()))
-                else:
-                    print(pivot_df.head(20))
-        except Exception:
-            # don't fail the chart if debug printing fails
-            pass
-
-    # 7) Decide tickformat: if values are large (>1000) use no decimals, else show 2 decimals
-    max_val = float(pivot_df["Total"].abs().max()) if not pivot_df["Total"].empty else 0.0
-    if max_val >= 1000:
+    # 8. Choose y-axis formatting and explicit range
+    max_total = float(pivot_df["Total"].abs().max()) if not pivot_df["Total"].empty else 0.0
+    if max_total >= 1_000_000:
+        y_tickformat = ",.0f"
+    elif max_total >= 1_000:
         y_tickformat = ",.0f"
     else:
         y_tickformat = ",.2f"
 
-    # 8) Build figure
+    # set range from 0 to 1.05*max_total (if max_total is 0, leave auto)
+    if max_total > 0:
+        y_range = [0, max_total * 1.05]
+    else:
+        y_range = None
+
+    # 9. Build figure
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=pivot_df["MonthStart"],
@@ -150,6 +133,7 @@ def monthly_trend_line(
         ),
         customdata=np.stack([pivot_df["Total"].values], axis=1)
     ))
+
     fig.add_trace(go.Scatter(
         x=pivot_df["MonthStart"],
         y=pivot_df["Credit"],
@@ -164,11 +148,11 @@ def monthly_trend_line(
         customdata=np.stack([pivot_df["Total"].values], axis=1)
     ))
 
-    # 9) Layout: ensure date type, tick density and y tickformat chosen above
+    # 10. Layout with forced y-range if available
     tick_step = max(1, int(len(pivot_df) / 8)) if len(pivot_df) > 0 else 1
     tickvals = pivot_df["MonthStart"].iloc[::tick_step].tolist() if len(pivot_df) > 0 else None
 
-    fig.update_layout(
+    layout_update = dict(
         title="Monthly Spending Trend (Debit vs Credit)",
         xaxis=dict(
             title="Month",
@@ -177,12 +161,22 @@ def monthly_trend_line(
             tickmode="array" if tickvals is not None else "auto",
             tickvals=tickvals
         ),
-        yaxis=dict(title="Total Amount", tickprefix=f"{currency_symbol} ", tickformat=y_tickformat),
+        yaxis=dict(
+            title="Total Amount",
+            tickprefix=f"{currency_symbol} ",
+            tickformat=y_tickformat
+        ),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=60, r=20, t=60, b=60)
     )
 
-    if container is not None:
+    if y_range is not None:
+        layout_update["yaxis"]["range"] = y_range
+
+    fig.update_layout(**layout_update)
+
+    if container:
         container.plotly_chart(fig, use_container_width=True)
+
     return fig
