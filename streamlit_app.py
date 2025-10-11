@@ -147,50 +147,32 @@ if df.empty:
     st.stop()
 
 st.success(f"✅ Successfully loaded data from Google Sheet — {len(df):,} rows read.")
-cleaned_df = df
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# --- Step 1: Ensure correct data types ---
-cleaned_df["DateTime"] = pd.to_datetime(cleaned_df["DateTime"], errors="coerce")
-cleaned_df["Amount"] = pd.to_numeric(cleaned_df["Amount"], errors="coerce")
+df['DateTime'] = pd.to_datetime(df['DateTime'])
 
-# --- Step 2: Filter for debit transactions only ---
-df_debit = cleaned_df[cleaned_df["Type"].str.lower() == "debit"].copy()
+# Filter only debit transactions
+df_debit = df[df['Type'].str.lower() == 'debit']
 
-# --- Step 3: Group by date and sum (same as Jupyter) ---
-daily_spend = (
-    df_debit.groupby(df_debit["DateTime"].dt.date)["Amount"]
-    .sum()
-    .reset_index()
-)
-daily_spend.columns = ["Date", "Total_Spent"]
-
-# --- Step 4: Sort by date to ensure correct order ---
-daily_spend = daily_spend.sort_values("Date")
-
-# --- Step 5: Plot ---
-st.subheader("💸 Daily Debit Spending Trend")
-
+# (Optional) Aggregate by day if you have many entries per day
+daily_spend = df_debit.groupby(df_debit['DateTime'].dt.date)['Amount'].sum().reset_index()
+daily_spend.columns = ['Date', 'Total_Spent']
 fig = px.line(
     daily_spend,
-    x="Date",
-    y="Total_Spent",
-    title="📈 Daily Debit Spending Over Time",
+    x='Date',
+    y='Total_Spent',
+    title='💸 Daily Spending Over Time',
     markers=True,
-    line_shape="spline",
+    line_shape='spline'
 )
 
 fig.update_layout(
-    xaxis_title="Date",
-    yaxis_title="Total Spent (₹)",
-    template="plotly_white",
-    showlegend=False,
+    xaxis_title='Date',
+    yaxis_title='Total Spent (₹)',
+    template='plotly_white'
 )
 
-st.plotly_chart(fig, use_container_width=True)
-
-# --- Optional: Show preview ---
-with st.expander("📄 View Daily Spend Data"):
-    st.dataframe(daily_spend)
+fig.show()
