@@ -193,7 +193,7 @@ st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="his
 
 chart_container = st.container()
 st.subheader("📈 Monthly Trend (Aggregated)")
-monthly_trend_line(cleaned_df, container=chart_container, year=year_filter, currency_symbol="₹")
+
 
 st.divider()
 
