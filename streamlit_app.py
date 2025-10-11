@@ -202,6 +202,18 @@ selected_year = st.sidebar.selectbox("Year", options=years_opts, index=default_i
 
 year_filter = None if selected_year == "All" else int(selected_year)
 
-# render chart (monthly trend) — use a single container and single call
+from charts import monthly_trend_bar
+
+# year selector (same as before)
+years = cleaned_df["DateTime"].dropna().dt.year.astype(int).sort_values().unique().tolist()
+years_opts = ["All"] + [int(y) for y in years]
+selected_year = st.sidebar.selectbox("Year", options=years_opts, index=len(years_opts)-1)
+year_filter = None if selected_year == "All" else int(selected_year)
+
 chart_container = st.container()
-monthly_trend(cleaned_df, container=chart_container, year=selected_year if selected_year!="All" else None, show_debit_credit=True)
+monthly_trend_bar(
+    cleaned_df,
+    container=chart_container,
+    year=year_filter,
+    stacked=True   # or False for grouped bars
+)
