@@ -1,16 +1,15 @@
 # streamlit_app.py
 """
-Single-file Streamlit app:
-- Reads Google Sheet (service account via st.secrets or local JSON file)
-- Converts columns: amounts -> rounded nullable Int64; detects timestamp & date
-- Produces a single canonical `timestamp` (datetime64[ns]) and `date` (python.date)
-- Aggregates daily totals (Total_Spent / Total_Credit)
-- Interactive Altair chart with:
-    * debit (red) and credit (green)
-    * year + month filters
-    * checkboxes to include series
-    * legend-click highlight (opacity)
-- Diagnostics: top rows + merged.describe()
+Streamlit app — sidebar filters + click-to-show-rows
+
+Features:
+- Read Google Sheet (service account via st.secrets or local JSON)
+- Normalize columns: Amount -> rounded Int64; detect timestamp + date
+- Compute daily totals (Total_Spent / Total_Credit)
+- Sidebar filters: Year, Month(s), Series (debit/credit)
+- Sidebar date selector (shows corresponding table rows below chart)
+- Optional Plotly "click-to-select" mode (requires `streamlit-plotly-events` package)
+- Altair chart used by default (fast, interactive); Plotly used only when click-to-select toggled
 """
 
 import streamlit as st
@@ -25,22 +24,54 @@ from googleapiclient.errors import HttpError
 
 import altair as alt
 
+# Try to import the optional helper for Plotly click capture
+_plotly_events_available = False
+try:
+    from streamlit_plotly_events import plotly_events
+    _plotly_events_available = True
+except Exception:
+    _plotly_events_available = False
+
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Sheet → Daily Spend (Altair)", layout="wide")
-st.title("💳 Daily Spending — Altair (red/green + year/month filters)")
+st.set_page_config(page_title="Sheet → Daily Spend (interactive)", layout="wide")
+st.title("💳 Daily Spending — Filters in sidebar + click-to-show-rows")
 
-# ---------------- Sidebar inputs ----------------
-SHEET_ID = st.sidebar.text_input(
-    "Google Sheet ID (between /d/ and /edit)",
-    value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk"
-)
-RANGE = st.sidebar.text_input("Range or Sheet Name", value="History Transactions")
-st.sidebar.caption("Provide service account JSON via st.secrets['gcp_service_account'] or as a local file below.")
-CREDS_FILE = st.sidebar.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
-if st.sidebar.button("Refresh Now"):
-    st.experimental_rerun()
+# ---------------- Sidebar: Google sheet inputs + filters ----------------
+with st.sidebar:
+    st.header("Data source & filters")
 
-# ---------------- Helpers ----------------
+    SHEET_ID = st.text_input(
+        "Google Sheet ID (between /d/ and /edit)",
+        value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk"
+    )
+    RANGE = st.text_input("Range or Sheet Name", value="History Transactions")
+    st.caption("Provide service account JSON via st.secrets['gcp_service_account'] or a local file path below.")
+    CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
+
+    st.markdown("---")
+    st.subheader("Chart options")
+    enable_plotly_click = st.checkbox(
+        "Enable click-to-select (Plotly) — requires `streamlit-plotly-events`",
+        value=False
+    )
+    if enable_plotly_click and not _plotly_events_available:
+        st.warning("`streamlit-plotly-events` not installed. Toggle off or install it (`pip install streamlit-plotly-events`).")
+
+    st.markdown("---")
+    st.write("Series to include")
+    show_debit = st.checkbox("Debit (Total_Spent)", value=True)
+    show_credit = st.checkbox("Credit (Total_Credit)", value=True)
+
+    st.markdown("---")
+    st.write("Date selection (click-to-select will override this when used)")
+    # placeholder for date selector; will be populated later after data loads
+    selected_date_sidebar = st.empty()
+
+    st.markdown("---")
+    if st.button("Refresh data"):
+        st.experimental_rerun()
+
+# ---------------- Helper functions (same conversion + aggregation used earlier) ----------------
 def parse_service_account_secret(raw: Any) -> Dict:
     if isinstance(raw, dict):
         return raw
@@ -104,7 +135,8 @@ def values_to_dataframe(values: List[List[str]]) -> pd.DataFrame:
         return df
 
 @st.cache_data(ttl=300)
-def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional[Dict] = None, creds_file: Optional[str] = None) -> pd.DataFrame:
+def read_google_sheet(spreadsheet_id: str, range_name: str,
+                      creds_info: Optional[Dict] = None, creds_file: Optional[str] = None) -> pd.DataFrame:
     if creds_info is None and (creds_file is None or not os.path.exists(creds_file)):
         if "gcp_service_account" not in st.secrets:
             raise ValueError("No credentials found. Add service account JSON to st.secrets['gcp_service_account'] or supply a local file.")
@@ -118,24 +150,21 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# ---------------- Convert & derive ----------------
 def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-
     df = df.copy()
     df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
-
     date_keywords = ['date', 'time', 'timestamp', 'datetime', 'txn']
     num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit', 'spent']
 
-    # Parse obvious date-like columns
+    # Parse date-like columns
     for col in list(df.columns):
         lname = str(col).lower()
         if any(k in lname for k in date_keywords) or lname.startswith("unnamed"):
             df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
 
-    # Coerce amount-like columns to Int64
+    # Coerce amounts to Int64
     amount_cols = []
     for col in list(df.columns):
         lname = str(col).lower()
@@ -145,7 +174,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = coerced.astype('Int64')
             amount_cols.append(col)
 
-    # Heuristic: convert other object columns that look numeric
+    # Heuristic: convert object columns that look numeric
     for col in list(df.columns):
         if pd.api.types.is_object_dtype(df[col]):
             sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
@@ -154,7 +183,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
                 coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce').round(0)
                 df[col] = coerced.astype('Int64')
 
-    # Prefer a canonical Amount column name
+    # Canonical Amount column
     preferred = None
     for candidate in ['amount','total_spent','totalspent','total','txn amount','value','spent']:
         for col in df.columns:
@@ -169,13 +198,12 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
         if 'Amount' not in df.columns:
             df.rename(columns={preferred: 'Amount'}, inplace=True)
 
-    # Ensure Amount exists as Int64 if possible
     if 'Amount' in df.columns:
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').round(0).astype('Int64')
     else:
         df['Amount'] = pd.NA
 
-    # Determine primary datetime column
+    # Pick primary datetime column
     primary_dt_col = None
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]) and df[col].notna().sum() > 0:
@@ -199,7 +227,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
                     primary_dt_col = col
                     break
 
-    # Create canonical timestamp & date
+    # canonical timestamp and date
     if primary_dt_col:
         df['timestamp'] = pd.to_datetime(df[primary_dt_col], errors='coerce')
     else:
@@ -211,7 +239,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         df['date'] = pd.NA
 
-    # Remove other original date-like columns (preserve canonical ones)
+    # drop original date-like columns except canonical ones
     cols_to_drop = []
     for col in list(df.columns):
         low = str(col).lower()
@@ -222,7 +250,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     if cols_to_drop:
         df = df.drop(columns=cols_to_drop)
 
-    # Reorder: timestamp, date first
+    # reorder
     cols = list(df.columns)
     final_cols = []
     if 'timestamp' in cols:
@@ -235,11 +263,9 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     df = df[final_cols]
     return df
 
-# ---------------- Daily aggregation ----------------
 def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=['Date','Total_Spent','Total_Credit'])
-
     w = df.copy()
     if 'date' in w.columns and w['date'].notna().any():
         grp = pd.to_datetime(w['date']).dt.normalize()
@@ -274,9 +300,9 @@ def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
     merged = merged.sort_values('Date').reset_index(drop=True)
     return merged
 
-# ---------------- Main flow ----------------
+# ---------------- Load data ----------------
 if not SHEET_ID:
-    st.info("Enter your Google Sheet ID to load data.")
+    st.sidebar.error("Enter Google Sheet ID in the sidebar.")
     st.stop()
 
 with st.spinner("Fetching Google Sheet..."):
@@ -293,147 +319,184 @@ if df_raw.empty:
     st.warning("No data returned from sheet. Check sheet id / range / permissions.")
     st.stop()
 
-st.success(f"Loaded {len(df_raw):,} rows, {df_raw.shape[1]} columns.")
-
+# convert + derive
 converted_df = convert_columns_and_derives(df_raw)
 
-# Diagnostics
-st.subheader("Top 10 rows (after conversion)")
-st.write(converted_df.head(10))
-
-st.subheader("Column data types")
-dt_df = pd.DataFrame({
-    "column": converted_df.columns.astype(str),
-    "dtype": [str(converted_df[c].dtype) for c in converted_df.columns]
-})
-st.write(dt_df)
-
-if 'Amount' in converted_df.columns:
-    st.subheader("Amount summary")
-    amt = converted_df['Amount']
-    st.write({
-        "non_null_count": int(amt.notna().sum()),
-        "min": int(amt.min()) if amt.notna().any() else None,
-        "max": int(amt.max()) if amt.notna().any() else None,
-        "mean": float(amt.dropna().astype(float).mean()) if amt.notna().any() else None
-    })
-
-st.subheader("Derived date/timestamp info")
-st.write("timestamp non-null:", int(converted_df['timestamp'].notna().sum()))
-st.write("date non-null:", int(converted_df['date'].notna().sum()))
-
-st.download_button("⬇️ Download converted CSV", data=converted_df.to_csv(index=False).encode('utf-8'),
-                   file_name="converted_sheet.csv", mime="text/csv")
-
-# ---------------- Aggregation ----------------
+# compute merged daily totals
 merged = compute_daily_totals(converted_df)
 
-st.subheader("Daily totals (merged) — top rows")
-st.write(merged.head(10))
-
-st.subheader("Daily totals description")
-try:
-    st.write(merged[['Total_Spent','Total_Credit']].describe().applymap(lambda x: float(x) if pd.notna(x) else x))
-except Exception:
-    st.write("No daily totals to describe.")
-
-# ---------------- Year & Month filters ----------------
-if not merged.empty:
-    merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
-    years = sorted(merged['Date'].dt.year.unique().tolist())
-    years_opts = ['All'] + [str(y) for y in years]
-    sel_year = st.selectbox("Select year", years_opts, index=0)
-
-    # months available in the selected year (if year selected)
-    if sel_year == 'All':
-        month_frame = merged.copy()
+# ---------------- Sidebar: Year/Month filters & date selector population ----------------
+with st.sidebar:
+    # year choices
+    if not merged.empty:
+        merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
+        years = sorted(merged['Date'].dt.year.unique().tolist())
+        years_opts = ['All'] + [str(y) for y in years]
+        sel_year = st.selectbox("Year", years_opts, index=0)
+        # months in selected year
+        if sel_year == 'All':
+            month_frame = merged.copy()
+        else:
+            month_frame = merged[merged['Date'].dt.year == int(sel_year)]
+        month_nums = sorted(month_frame['Date'].dt.month.unique().tolist())
+        month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}
+        month_choices = [month_map[m] for m in month_nums]
+        sel_months = st.multiselect("Month(s)", options=month_choices, default=month_choices)
+        # populate date selector: show dates matching current year/month filter
+        # map back names to numbers for selection
+        inv_map = {v:k for k,v in month_map.items()}
+        selected_month_nums = [inv_map[m] for m in sel_months] if sel_months else []
+        filter_dates = merged.copy()
+        if sel_year != 'All':
+            filter_dates = filter_dates[filter_dates['Date'].dt.year == int(sel_year)]
+        if selected_month_nums:
+            filter_dates = filter_dates[filter_dates['Date'].dt.month.isin(selected_month_nums)]
+        date_options = ['All'] + [d.date().isoformat() for d in filter_dates['Date'].dt.to_pydatetime()]
+        # unique + sorted
+        date_options = sorted(list(dict.fromkeys(date_options)))
+        sel_date = st.selectbox("Select date to show rows", options=date_options, index=0)
     else:
-        month_frame = merged[merged['Date'].dt.year == int(sel_year)]
+        sel_year = 'All'
+        sel_months = []
+        sel_date = 'All'
 
-    # month list in calendar order
-    month_nums = month_frame['Date'].dt.month.unique().tolist()
-    month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}
-    month_choices = [month_map[m] for m in sorted(month_nums)]
-    # default select all months found
-    sel_months = st.multiselect("Select month(s)", options=month_choices, default=month_choices)
-
-else:
-    sel_year = 'All'
-    sel_months = []
-
-# ---------------- Series checkboxes ----------------
-st.markdown("### Select series to display")
-show_debit = st.checkbox("Show debit (Total_Spent)", value=True)
-show_credit = st.checkbox("Show credit (Total_Credit)", value=True)
-
-# ---------------- Prepare plot DataFrame (apply filters) ----------------
+# ---------------- Apply year/month filters to merged and prepare plot_df ----------------
 plot_df = merged.copy()
-
-# apply year filter
 if sel_year != 'All':
-    try:
-        plot_df = plot_df[plot_df['Date'].dt.year == int(sel_year)]
-    except Exception:
-        pass
-
-# apply month filter
+    plot_df = plot_df[plot_df['Date'].dt.year == int(sel_year)]
+# convert selected month names back to nums
 if sel_months:
-    # map back month names to month numbers
-    inv_map = {v: k for k, v in month_map.items()}
+    inv_map = {v:k for k,v in {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}.items()}
     selected_month_nums = [inv_map[m] for m in sel_months if m in inv_map]
     if selected_month_nums:
         plot_df = plot_df[plot_df['Date'].dt.month.isin(selected_month_nums)]
 
-# sort and ensure numeric
 plot_df = plot_df.sort_values('Date').reset_index(drop=True)
 plot_df['Total_Spent'] = pd.to_numeric(plot_df.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
 plot_df['Total_Credit'] = pd.to_numeric(plot_df.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
 
-st.write("MERGED sample (top 10) after filters:")
-st.write(plot_df.head(10))
+# ---------------- Chart & click-to-select logic ----------------
+st.subheader("Daily Spend and Credit")
 
-# ---------------- Altair plotting ----------------
+# prepare long form
 if plot_df.empty:
-    st.info("No daily totals available to plot for the selected filters.")
+    st.info("No data for the selected filters.")
 else:
     plot_df_long = plot_df.melt(id_vars='Date', value_vars=['Total_Spent', 'Total_Credit'],
                                 var_name='Type', value_name='Amount').sort_values('Date')
+    plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
+    plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
 
-    # apply series checkboxes
-    selected_series = []
-    if show_debit: selected_series.append('Total_Spent')
-    if show_credit: selected_series.append('Total_Credit')
+    # determine which series to plot from checkboxes (sidebar)
+    series_selected = []
+    if show_debit: series_selected.append('Total_Spent')
+    if show_credit: series_selected.append('Total_Credit')
 
-    if not selected_series:
-        st.info("Select at least one series to display.")
+    if not series_selected:
+        st.info("Enable at least one series (debit or credit) in the sidebar.")
     else:
-        plot_df_long = plot_df_long[plot_df_long['Type'].isin(selected_series)].copy()
-        plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
-        plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
+        plot_df_long = plot_df_long[plot_df_long['Type'].isin(series_selected)].copy()
 
-        # Legend selection will highlight (opacity) rather than filter
-        legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
+        # If plotly click mode requested and available -> use Plotly and capture click
+        clicked_date = None
+        plotly_used = False
+        if enable_plotly_click and _plotly_events_available:
+            plotly_used = True
+            import plotly.express as px
+            fig = px.line(plot_df_long, x='Date', y='Amount', color='Type', markers=True,
+                          title="(Plotly) Click a point to select its date")
+            fig.update_layout(hovermode='x unified', legend_title='Type')
+            # display via plotly_events and capture click
+            res = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key="plotly_click_1")
+            # res is a list of dicts describing clicked points, if any
+            if res:
+                # try to extract x value robustly
+                first = res[0]
+                xval = first.get('x') or first.get('x_val') or first.get('bbox', {}).get('x')
+                # fallback: 'pointNumber' or 'pointIndex' not helpful; xval may be ISO string
+                try:
+                    if xval is not None:
+                        clicked_date = pd.to_datetime(xval).date()
+                except Exception:
+                    clicked_date = None
+        else:
+            # show Altair chart (default)
+            color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#d62728', '#2ca02c'])
+            legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
+            base = alt.Chart(plot_df_long).mark_line(point=True).encode(
+                x=alt.X('Date:T', title='Date'),
+                y=alt.Y('Amount:Q', title='Amount', axis=alt.Axis(format=",.0f")),
+                color=alt.Color('Type:N', title='Type', scale=color_scale),
+                tooltip=[alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
+                         alt.Tooltip('Type:N', title='Type'),
+                         alt.Tooltip('Amount:Q', title='Amount', format=',')],
+                opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
+            ).add_selection(legend_sel).interactive()
+            st.altair_chart(base.properties(height=450), use_container_width=True)
 
-        # color mapping: debit (Total_Spent) -> red, credit (Total_Credit) -> green
-        color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#d62728', '#2ca02c'])
+        # Determine selected date: priority order
+        # 1) if Plotly click produced a date -> use it
+        # 2) else if user selected a date in sidebar -> use that
+        # 3) else 'All'
+        selected_date_value = None
+        if clicked_date is not None:
+            selected_date_value = clicked_date
+        else:
+            # use sel_date from sidebar
+            if sel_date != 'All':
+                try:
+                    selected_date_value = pd.to_datetime(sel_date).date()
+                except Exception:
+                    selected_date_value = None
+            else:
+                selected_date_value = None
 
-        base = alt.Chart(plot_df_long).encode(
-            x=alt.X('Date:T', title='Date'),
-            y=alt.Y('Amount:Q', title='Amount', axis=alt.Axis(format=",.0f")),
-            color=alt.Color('Type:N', title='Type', scale=color_scale),
-            tooltip=[
-                alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
-                alt.Tooltip('Type:N', title='Type'),
-                alt.Tooltip('Amount:Q', title='Amount', format=',')
-            ],
-            opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
-        ).add_selection(legend_sel)
+        # Show note to user when click-mode is not available
+        if enable_plotly_click and not _plotly_events_available:
+            st.info("Plotly click-mode was requested but `streamlit-plotly-events` is not installed. Install it with `pip install streamlit-plotly-events` to enable click-to-select.")
 
-        line = base.mark_line(point=False).encode()
-        points = base.mark_point(filled=True, size=40).encode()
+        # Show selection info
+        if selected_date_value is not None:
+            st.markdown(f"**Showing rows for date:** {selected_date_value.isoformat()}")
+        else:
+            st.markdown("**Showing rows for:** All dates (filtered by Year/Month)")
 
-        chart = (line + points).properties(title="Daily Spend and Credit — Altair", height=450).interactive()
+        # ---------------- Show table of underlying rows filtered by the selected date and sidebar filters ----------------
+        # Filter converted_df by the same Year/Month filters, then by selected date if provided
+        rows_df = converted_df.copy()
 
-        st.altair_chart(chart, use_container_width=True)
+        # convert timestamp to datetime, ensure date col exists
+        if 'timestamp' in rows_df.columns:
+            rows_df['timestamp'] = pd.to_datetime(rows_df['timestamp'], errors='coerce')
+        else:
+            # try to create from 'date' if absent
+            if 'date' in rows_df.columns:
+                rows_df['timestamp'] = pd.to_datetime(rows_df['date'], errors='coerce')
+            else:
+                rows_df['timestamp'] = pd.NaT
+
+        # apply year/month sidebar filters to rows_df
+        if sel_year != 'All':
+            try:
+                rows_df = rows_df[rows_df['timestamp'].dt.year == int(sel_year)]
+            except Exception:
+                pass
+        if sel_months:
+            inv_map = {v: k for k, v in {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}.items()}
+            selected_month_nums = [inv_map[m] for m in sel_months if m in inv_map]
+            if selected_month_nums:
+                rows_df = rows_df[rows_df['timestamp'].dt.month.isin(selected_month_nums)]
+
+        # apply selected date (if any)
+        if selected_date_value is not None:
+            rows_df = rows_df[rows_df['timestamp'].dt.date == selected_date_value]
+
+        # show a compact table below the chart
+        st.subheader("Rows (matching selection)")
+        if rows_df.empty:
+            st.write("No rows match the current filters/selection.")
+        else:
+            # show all columns but limit rows to a reasonable number first; provide an expand option
+            st.dataframe(rows_df.reset_index(drop=True))
 
 # End of file
