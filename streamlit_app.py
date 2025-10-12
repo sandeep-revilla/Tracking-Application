@@ -349,6 +349,8 @@ merged = merged.sort_values('Date').reset_index(drop=True)
 # ensure numeric native dtypes (float64) to avoid weird formatting issues
 merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
 merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
+
+# small diagnostics
 st.write("MERGED sample (top 10):")
 st.write(merged.head(10))
 
@@ -360,19 +362,6 @@ except Exception as e:
 
 st.write("Merged dtypes:")
 st.write(merged.dtypes)
-
-# --- Robust Altair plotting block: handles single-day & small domains ---
-# normalize & sort dates
-merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
-merged = merged.sort_values('Date').reset_index(drop=True)
-
-# ensure numeric native dtypes
-merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
-merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
-
-# small debug (optional) - uncomment to inspect at runtime
-# st.write("MERGED head:", merged.head(10))
-# st.write("Date min/max/nunique:", merged['Date'].min(), merged['Date'].max(), merged['Date'].nunique())
 
 # prepare long-form DF
 plot_df = merged.copy()
@@ -394,32 +383,38 @@ else:
         plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
         plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
 
-        # compute x domain safely (expand if single date)
+        # compute x domain safely (expand if single date) and convert to ISO strings for Altair
         x_min = plot_df['Date'].min()
         x_max = plot_df['Date'].max()
         if pd.isna(x_min) or pd.isna(x_max):
-            # fallback - let Altair handle domain
             x_domain = None
         else:
             if x_min == x_max:
-                # expand by ±1 day so axis has span
-                x_min = x_min - pd.Timedelta(days=1)
-                x_max = x_max + pd.Timedelta(days=1)
+                x_min = pd.to_datetime(x_min) - pd.Timedelta(days=1)
+                x_max = pd.to_datetime(x_max) + pd.Timedelta(days=1)
             else:
-                # optionally expand a little for nicer padding (1 day)
-                x_min = x_min - pd.Timedelta(days=0)
-                x_max = x_max + pd.Timedelta(days=0)
-            x_domain = [x_min, x_max]
+                x_min = pd.to_datetime(x_min)
+                x_max = pd.to_datetime(x_max)
+            # IMPORTANT: use ISO strings so Vega/Altair serializes domain correctly
+            x_domain = [x_min.isoformat(), x_max.isoformat()]
 
         # legend selection highlights (doesn't filter rows)
         legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
 
-        x_axis = alt.X(
-            'Date:T',
-            title='Date',
-            axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45),
-            **({'scale': alt.Scale(domain=x_domain)} if x_domain is not None else {})
-        )
+        # create x_axis with scale only when domain is valid
+        if x_domain is not None:
+            x_axis = alt.X(
+                'Date:T',
+                title='Date',
+                axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45),
+                scale=alt.Scale(domain=x_domain)
+            )
+        else:
+            x_axis = alt.X(
+                'Date:T',
+                title='Date',
+                axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45)
+            )
 
         y_axis = alt.Y(
             'Amount:Q',
@@ -449,3 +444,4 @@ else:
 
         st.altair_chart(chart, use_container_width=True)
 
+# --- END replacement block ---
