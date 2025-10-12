@@ -781,5 +781,10 @@ with c1:
 with c2:
     matplotlib_daily_spend_consistent(merged, y_max=y_max)
 
+show_debit = st.checkbox("Show debit", value=True)
+show_credit = st.checkbox("Show credit", value=True)
+series_to_plot = []
+if show_debit: series_to_plot.append('Total_Spent')
+if show_credit: series_to_plot.append('Total_Credit')
 
 
