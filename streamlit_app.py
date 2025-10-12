@@ -285,45 +285,83 @@ colB.write(f"Columns: {', '.join(cleaned_df.columns.astype(str))}")
 clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
 
-# ---------------- Daily aggregation & diagnostics ----------------
-# Ensure Amount numeric (cleaner might have done this)
+# ---------------- Daily aggregation & improved diagnostics & fallback ----------------
+st.subheader("Debugging & aggregation (auto-diagnostics)")
+
+# 1) Ensure Amount numeric (cleaner might have done this)
 if 'Amount' in cleaned_df.columns:
-    cleaned_df['Amount'] = pd.to_numeric(cleaned_df['Amount'], errors='coerce').fillna(0.0)
-
-# Ensure DateTime is datetime
-if 'DateTime' in cleaned_df.columns:
-    try:
-        cleaned_df['DateTime'] = pd.to_datetime(cleaned_df['DateTime'])
-    except Exception:
-        pass
+    cleaned_df['Amount'] = pd.to_numeric(cleaned_df['Amount'].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
 else:
-    cleaned_df['DateTime'] = pd.NaT
+    cleaned_df['Amount'] = pd.NA
 
-# Filter debit and credit rows
+st.write("Amount summary:")
 try:
-    df_debit = cleaned_df[cleaned_df['Type'].str.lower() == 'debit'].copy()
+    st.write(cleaned_df['Amount'].describe())
 except Exception:
-    df_debit = pd.DataFrame(columns=cleaned_df.columns)
+    st.write("No Amount column or not numeric")
 
+# 2) Ensure DateTime exists — try common alternate column names if missing
+date_candidates = ['DateTime', 'Datetime', 'Timestamp', 'Date', 'Txn Date', 'TxnDate', 'timestamp', 'date']
+if 'DateTime' in cleaned_df.columns:
+    cleaned_df['DateTime'] = pd.to_datetime(cleaned_df['DateTime'], errors='coerce')
+else:
+    for cand in date_candidates:
+        if cand in cleaned_df.columns:
+            cleaned_df['DateTime'] = pd.to_datetime(cleaned_df[cand], errors='coerce', dayfirst=False)
+            st.write(f"Parsed DateTime from column `{cand}`")
+            break
+# show how many parsed
+if 'DateTime' in cleaned_df.columns:
+    st.write("DateTime non-null count:", int(cleaned_df['DateTime'].notna().sum()), "null count:", int(cleaned_df['DateTime'].isna().sum()))
+else:
+    st.write("No DateTime column found after attempts.")
+
+# 3) Normalize and map Type values (common bank notations)
+if 'Type' in cleaned_df.columns:
+    cleaned_df['Type'] = cleaned_df['Type'].astype(str).str.strip().str.lower()
+    mapping = {
+        'dr':'debit','d':'debit','debit':'debit','withdrawal':'debit','debited':'debit',
+        'cr':'credit','c':'credit','credit':'credit','deposit':'credit','credited':'credit'
+    }
+    cleaned_df['Type'] = cleaned_df['Type'].map(lambda x: mapping.get(x, x))
+else:
+    cleaned_df['Type'] = ''
+
+st.write("Type value counts (top):")
 try:
-    df_credit = cleaned_df[cleaned_df['Type'].str.lower() == 'credit'].copy()
+    st.write(cleaned_df['Type'].value_counts(dropna=False).head(20))
 except Exception:
-    df_credit = pd.DataFrame(columns=cleaned_df.columns)
+    st.write("No Type counts available")
 
-def safe_daily_sum(df_frame, col_amount='Amount', datetime_col='DateTime'):
-    if df_frame.empty or datetime_col not in df_frame.columns:
-        return pd.DataFrame(columns=['Date', col_amount])
+# 4) If Type is missing or mostly empty, infer from Amount sign
+if cleaned_df['Type'].astype(str).str.strip().eq('').sum() >= len(cleaned_df) * 0.5:
+    st.write("Inferring Type from Amount sign (many missing/unknown Type values).")
+    cleaned_df['Type'] = cleaned_df['Amount'].apply(lambda v: 'debit' if pd.notna(v) and v < 0 else ('credit' if pd.notna(v) and v > 0 else ''))
+
+# 5) Build df_debit and df_credit
+df_debit = cleaned_df[cleaned_df['Type'].astype(str).str.lower() == 'debit'].copy()
+df_credit = cleaned_df[cleaned_df['Type'].astype(str).str.lower() == 'credit'].copy()
+st.write("Rows found — debit:", df_debit.shape[0], "credit:", df_credit.shape[0])
+
+# 6) Group into daily sums using the filtered frames (defensive)
+def compute_daily(df_frame, amount_col='Amount', dt_col='DateTime', out_col='Total'):
+    if df_frame.empty or dt_col not in df_frame.columns:
+        return pd.DataFrame(columns=['Date', out_col])
     try:
-        daily = df_frame.groupby(df_frame[datetime_col].dt.date)[col_amount].sum().reset_index()
-        daily.columns = ['Date', col_amount]
+        daily = df_frame.groupby(df_frame[dt_col].dt.date)[amount_col].sum().reset_index()
+        daily.columns = ['Date', out_col]
         return daily
     except Exception:
-        return pd.DataFrame(columns=['Date', col_amount])
+        return pd.DataFrame(columns=['Date', out_col])
 
-daily_spend = safe_daily_sum(df_debit, col_amount='Total_Spent', datetime_col='DateTime')
-daily_credit = safe_daily_sum(df_credit, col_amount='Total_Credit', datetime_col='DateTime')
+daily_spend = compute_daily(df_debit, amount_col='Amount', dt_col='DateTime', out_col='Total_Spent')
+daily_credit = compute_daily(df_credit, amount_col='Amount', dt_col='DateTime', out_col='Total_Credit')
 
-# Merge and sort properly
+st.write("Daily spend sample:", daily_spend.head())
+st.write("Daily credit sample:", daily_credit.head())
+
+# 7) Merge; if empty, fallback to overall daily sum (ignore Type)
+merged = pd.DataFrame()
 if not daily_spend.empty or not daily_credit.empty:
     merged = pd.merge(daily_spend, daily_credit, on='Date', how='outer').fillna(0)
     try:
@@ -331,88 +369,27 @@ if not daily_spend.empty or not daily_credit.empty:
     except Exception:
         pass
     merged = merged.sort_values('Date').reset_index(drop=True)
-else:
-    merged = pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit'])
 
-# Diagnostics: inspect the merged frame
-st.subheader("Debug: daily table (top rows)")
+# fallback: if merged is empty or has no rows with nonzero totals, compute overall daily totals (ignoring Type)
+need_fallback = merged.empty or (merged[['Total_Spent','Total_Credit']].sum(axis=1).abs().sum() == 0)
+if need_fallback:
+    st.write("Merged is empty or zero — computing overall daily totals (ignoring Type) as a fallback.")
+    try:
+        overall = cleaned_df.dropna(subset=['DateTime']).groupby(cleaned_df['DateTime'].dt.date)['Amount'].sum().reset_index()
+        overall.columns = ['Date', 'Total_Spent']
+        overall['Total_Credit'] = 0.0
+        overall['Date'] = pd.to_datetime(overall['Date'])
+        overall = overall.sort_values('Date').reset_index(drop=True)
+        merged = overall
+        st.write("Overall daily totals (fallback) sample:", merged.head())
+    except Exception as e:
+        st.write("Could not compute overall fallback daily totals:", e)
+        merged = pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit'])
+
+# final diagnostics
+st.write("Merged (top 15):")
 st.write(merged.head(15))
-
-if 'Total_Spent' in merged.columns:
-    st.write("Describe totals:", merged[['Total_Spent','Total_Credit']].describe().applymap(lambda x: float(x) if not pd.isna(x) else x))
+st.write("Merged shape:", merged.shape)
+if not merged.empty:
+    st.write("Merged describe:", merged[['Total_Spent','Total_Credit']].describe().applymap(lambda x: float(x) if not pd.isna(x) else x))
     st.write("Total_Spent diffs (first 10):", merged['Total_Spent'].diff().fillna(merged['Total_Spent']).head(10))
-
-# If the merged series is cumulative and you want daily differences, uncomment:
-# merged['Daily_Spent'] = merged['Total_Spent'].diff().fillna(merged['Total_Spent'])
-
-# ---------------- Matplotlib plot function (in-file) ----------------
-def format_currency(x, pos):
-    # simple formatter for y-axis (Indian/normal thousand separators)
-    try:
-        return f"{x:,.0f}"
-    except Exception:
-        return str(x)
-
-def daily_spend_matplotlib(df_plot: pd.DataFrame, debit_col='Total_Spent', credit_col=None):
-    """
-    Matplotlib implementation of the daily spend/credit line chart.
-    Note: Matplotlib charts are static (not as interactive as Plotly).
-    """
-    if df_plot is None or df_plot.empty:
-        st.info("No data to plot.")
-        return
-
-    if 'Date' not in df_plot.columns:
-        st.error("❌ 'Date' column missing from DataFrame.")
-        return
-    if debit_col not in df_plot.columns:
-        st.error(f"❌ '{debit_col}' column missing from DataFrame.")
-        return
-
-    # Ensure Date is datetime and sorted
-    try:
-        df_plot = df_plot.copy()
-        df_plot['Date'] = pd.to_datetime(df_plot['Date'])
-    except Exception:
-        pass
-    df_plot = df_plot.sort_values('Date').reset_index(drop=True)
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=(10, 4), dpi=100)
-
-    # Plot debit
-    ax.plot(df_plot['Date'], df_plot[debit_col], marker='o', linestyle='-', linewidth=2, label=debit_col)
-
-    # Plot credit if present
-    if credit_col and credit_col in df_plot.columns:
-        ax.plot(df_plot['Date'], df_plot[credit_col], marker='o', linestyle='--', linewidth=2, label=credit_col)
-
-    # Formatting
-    ax.set_title("💸 Daily Debit and Credit Trend", fontsize=14)
-    ax.set_xlabel("Date", fontsize=11)
-    ax.set_ylabel("Amount (₹)", fontsize=11)
-    ax.grid(axis='y', alpha=0.3)
-
-    # Date formatting on x-axis
-    locator = mdates.AutoDateLocator()
-    formatter = mdates.ConciseDateFormatter(locator)
-    ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(formatter)
-    plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
-
-    # Y-axis formatter
-    ax.yaxis.set_major_formatter(FuncFormatter(format_currency))
-
-    # Legend
-    ax.legend(loc='upper left')
-
-    # Tight layout and show
-    fig.tight_layout()
-    st.pyplot(fig)
-    plt.close(fig)
-
-# ---------------- Final chart call ----------------
-st.subheader("📊 Daily Spending and Credit Trend")
-daily_spend_matplotlib(merged, debit_col='Total_Spent', credit_col='Total_Credit')
-
-# ---------------- End ----------------
