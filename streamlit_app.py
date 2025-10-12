@@ -428,5 +428,6 @@ else:
             .properties(title="Daily Spend and Credit — Altair", height=450)
             .interactive()
         )
+        
 
-        st.altair_chart(chart, u_
+        st.altair_chart(chart, use_container_width=True)
