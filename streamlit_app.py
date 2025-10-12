@@ -358,45 +358,77 @@ st.markdown("### Select series to display")
 show_debit = st.checkbox("Show debit (Total_Spent)", value=True)
 show_credit = st.checkbox("Show credit (Total_Credit)", value=True)
 
-# build long-form df for Altair
+# build long-form df for Altair (REPLACEMENT: normalizes Date & numeric dtypes; fixes axis)
+# ensure merged Date/dtypes are normalized & sorted
+merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
+merged = merged.sort_values('Date').reset_index(drop=True)
+
+# ensure numeric native dtypes (float64) to avoid weird formatting issues
+merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
+merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
+
+# build long-form DataFrame for Altair
 plot_df = merged.copy()
 if plot_df.empty:
     st.info("No daily totals available to plot.")
 else:
-    plot_df_long = plot_df.melt(id_vars='Date', value_vars=['Total_Spent','Total_Credit'],
-                                var_name='Type', value_name='Amount')
+    plot_df_long = plot_df.melt(id_vars='Date', value_vars=['Total_Spent', 'Total_Credit'],
+                                var_name='Type', value_name='Amount').sort_values('Date')
+
     # apply checkbox filters (this is rerun on user change)
     selected = []
     if show_debit: selected.append('Total_Spent')
     if show_credit: selected.append('Total_Credit')
+
     if not selected:
         st.info("Select at least one series to display.")
     else:
         plot_df_long = plot_df_long[plot_df_long['Type'].isin(selected)].copy()
+        plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
         plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
 
-        # Altair chart (legend click toggles too)
+        # set a clean x domain (min,max) to keep axis ticks consistent
+        x_min = plot_df['Date'].min()
+        x_max = plot_df['Date'].max()
+
+        # Altair selection + chart (fixed axis formatting)
         selection = alt.selection_multi(fields=['Type'], bind='legend')
+
+        x_axis = alt.X(
+            'Date:T',
+            title='Date',
+            axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45),
+            scale=alt.Scale(domain=[x_min, x_max])
+        )
+
+        y_axis = alt.Y(
+            'Amount:Q',
+            title='Amount',
+            axis=alt.Axis(format=",.0f")  # thousand separators, integer format
+        )
+
+        color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#1f77b4', '#ff7f0e'])
+
         chart = (
             alt.Chart(plot_df_long)
             .mark_line(point=True)
             .encode(
-                x=alt.X('Date:T', title='Date'),
-                y=alt.Y('Amount:Q', title='Amount', axis=alt.Axis(format=",")),
-                color=alt.Color('Type:N', title='Type'),
-                tooltip=[alt.Tooltip('Date:T', title='Date'),
-                         alt.Tooltip('Type:N', title='Type'),
-                         alt.Tooltip('Amount:Q', title='Amount', format=',')]
+                x=x_axis,
+                y=y_axis,
+                color=alt.Color('Type:N', title='Type', scale=color_scale),
+                tooltip=[
+                    alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
+                    alt.Tooltip('Type:N', title='Type'),
+                    alt.Tooltip('Amount:Q', title='Amount', format=',')
+                ]
             )
             .add_selection(selection)
-            .transform_filter(selection)
-            .properties(height=450, width='container', title="Daily Spend and Credit — Altair")
-            .interactive()  # enable pan/zoom
+            .transform_filter(selection)   # legend-click also toggles
+            .properties(title="Daily Spend and Credit — Altair", height=450)
+            .interactive()  # enables pan & zoom
         )
 
-        # Altair's default row limit may block large frames; the user can override if needed.
-        # alt.data_transformers.disable_max_rows()  # uncomment if you need to plot large datasets
-
         st.altair_chart(chart, use_container_width=True)
+
 
 # end of file
