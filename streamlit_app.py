@@ -1,13 +1,14 @@
 # streamlit_app.py
 """
-Single-file Streamlit app (no charts) — Amounts as integers; add date & timestamp:
+Single-file Streamlit app (no charts) — Amounts as integers; ensure single date & timestamp:
 - Connects to Google Sheets via service account (st.secrets or file)
 - Converts sheet values to a pandas DataFrame
 - Auto-converts columns to inferred types (dates / numeric)
 - Converts amount-like column(s) to integer (rounded) using pandas nullable Int64
-- Adds two derived columns:
-    - `date`      : only the date part (python date objects)
+- Ensures exactly two derived columns:
     - `timestamp` : full datetime (pandas datetime64[ns])
+    - `date`      : only the date part (python date objects)
+  and removes any other columns named 'timestamp' or 'date' (case-insensitive).
 - Shows top 10 rows and column data types
 - Offers cleaned CSV download
 """
@@ -22,8 +23,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Google Sheet Connector — Amounts Int + Date/Timestamp", layout="wide")
-st.title("🔐 Google Sheet Connector — Amounts → Integer, add date & timestamp")
+st.set_page_config(page_title="Google Sheet Connector — Single Date & Timestamp", layout="wide")
+st.title("🔐 Google Sheet Connector — Amounts → Integer; single date & timestamp")
 
 # ---------------- Sidebar Inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -126,14 +127,17 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# ---------------- Column type conversion utility (Amounts -> Int64; add date/timestamp) ----------------
-def convert_column_types_to_integer_with_date(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------- Column type conversion utility (Amounts -> Int64; single date/timestamp) ----------------
+def convert_column_types_to_integer_with_single_date_and_timestamp(df: pd.DataFrame) -> pd.DataFrame:
     """
     Heuristically convert columns:
       - parse columns with names containing date/time keywords to datetime
       - coerce amount-like columns to integer (rounded) using pandas 'Int64' dtype
       - attempt to convert other numeric-looking columns (rounded to integer)
-      - create 'timestamp' (datetime64[ns]) and 'date' (python date objects) columns derived from best datetime column found
+      - create exactly two standardized columns:
+          - `timestamp` (datetime64[ns])
+          - `date` (python.date objects)
+        and remove any other existing columns named 'timestamp' or 'date' (case-insensitive)
     Returns a new DataFrame with converted columns.
     """
     if df is None or df.empty:
@@ -148,14 +152,14 @@ def convert_column_types_to_integer_with_date(df: pd.DataFrame) -> pd.DataFrame:
     num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit', 'spent']
 
     # 1) Convert obvious date columns (including Unnamed: 0)
-    for col in df.columns:
+    for col in list(df.columns):
         lname = str(col).lower()
         if any(k in lname for k in date_keywords) or str(col).lower().startswith("unnamed"):
             df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
 
     # 2) Convert amount-like columns to numeric, round, and cast to nullable integer
     amount_columns = []
-    for col in df.columns:
+    for col in list(df.columns):
         lname = str(col).lower()
         if any(k in lname for k in num_keywords):
             coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
@@ -165,7 +169,7 @@ def convert_column_types_to_integer_with_date(df: pd.DataFrame) -> pd.DataFrame:
             amount_columns.append(col)
 
     # 3) Try to coerce other object columns that look numeric (use sample heuristic)
-    for col in df.columns:
+    for col in list(df.columns):
         if pd.api.types.is_object_dtype(df[col]):
             sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
             parsed = pd.to_numeric(sample, errors='coerce')
@@ -196,26 +200,24 @@ def convert_column_types_to_integer_with_date(df: pd.DataFrame) -> pd.DataFrame:
     if 'Amount' in df.columns:
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').round(0).astype('Int64')
 
-    # ---------------- derive timestamp & date ----------------
-    # Find best datetime column (prioritize existing datetime dtypes, then date-like names, then Unnamed: 0)
+    # ---------------- determine primary datetime column ----------------
     primary_dt_col = None
     # 1) any column already datetime dtype with non-null values
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]) and df[col].notna().sum() > 0:
             primary_dt_col = col
             break
-    # 2) look for common date-like column names
+    # 2) look for common date-like column names and parse if necessary
     if primary_dt_col is None:
         for col in df.columns:
             lname = str(col).lower()
             if any(k in lname for k in date_keywords) or str(col).lower().startswith("unnamed"):
-                # try parse and check
                 parsed = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
                 if parsed.notna().sum() > 0:
                     df[col] = parsed
                     primary_dt_col = col
                     break
-    # 3) try to parse any object column with many parseable dates
+    # 3) try parsing object columns with many parseable dates
     if primary_dt_col is None:
         for col in df.columns:
             if pd.api.types.is_object_dtype(df[col]):
@@ -225,26 +227,73 @@ def convert_column_types_to_integer_with_date(df: pd.DataFrame) -> pd.DataFrame:
                     primary_dt_col = col
                     break
 
-    # Create 'timestamp' and 'date' columns based on primary_dt_col
+    # ---------------- create canonical timestamp and date columns ----------------
+    # Create new canonical columns always named 'timestamp' and 'date'
     if primary_dt_col:
-        # timestamp: full datetime (datetime64[ns])
-        df['timestamp'] = pd.to_datetime(df[primary_dt_col], errors='coerce')
-        # date: only date portion (python date objects). Use .dt.date so it's obvious "only date".
-        try:
-            df['date'] = df['timestamp'].dt.date
-        except Exception:
-            # fallback to NaNs if something weird
-            df['date'] = pd.NA
+        timestamp_series = pd.to_datetime(df[primary_dt_col], errors='coerce')
     else:
-        # if no datetime found, create empty columns
-        df['timestamp'] = pd.NaT
+        timestamp_series = pd.Series([pd.NaT] * len(df), index=df.index, dtype='datetime64[ns]')
+
+    # Assign canonical timestamp column
+    df['timestamp'] = timestamp_series
+
+    # Assign canonical date column (python date objects) — use .dt.date, preserve NaNs as pd.NA
+    try:
+        # where timestamp is NaT, date will be pd.NaT -> convert to pd.NA
+        date_series = timestamp_series.dt.date
+        # Convert NaT entries to pd.NA for consistent missingness
+        date_series = date_series.where(pd.notna(timestamp_series), pd.NA)
+        df['date'] = date_series
+    except Exception:
+        # fallback: create empty date column
         df['date'] = pd.NA
+
+    # ---------------- remove other timestamp/date columns (case-insensitive), keep canonical ones ----------------
+    cols_to_drop = []
+    for col in list(df.columns):
+        low = str(col).lower()
+        if low in ('timestamp', 'date'):
+            # if it's the canonical just created, keep it; others handled below
+            # we keep the ones literally named 'timestamp' and 'date' (these are canonical now)
+            continue
+        # drop columns whose name matches timestamp/date (case-insensitive)
+        if low == 'timestamp' or low == 'date':
+            cols_to_drop.append(col)
+
+    # Additionally, drop any original columns that have names equal to 'timestamp'/'date' in different cases
+    # (above check already avoids canonical; here we examine original names duplicates)
+    # Build set of original name lowercases except canonical
+    original_names_lower = [str(c).lower() for c in df.columns if c not in ('timestamp','date')]
+    # If there were original columns named 'timestamp' or 'date' (different case), they would appear in cols_to_drop already.
+
+    # execute drop if any (be conservative: only drop if not the canonical ones)
+    if cols_to_drop:
+        df.drop(columns=cols_to_drop, inplace=True)
+
+    # Final safety: ensure there is exactly one 'timestamp' and one 'date' column
+    # If somehow duplicates remain with different cases, unify them by keeping the canonical ones and dropping others
+    for col in list(df.columns):
+        if col not in ('timestamp','date') and str(col).lower() in ('timestamp','date'):
+            df.drop(columns=[col], inplace=True)
+
+    # Reorder to put timestamp & date early (optional)
+    cols = list(df.columns)
+    # move timestamp and date to front if present
+    final_cols = []
+    if 'timestamp' in cols:
+        final_cols.append('timestamp')
+    if 'date' in cols:
+        final_cols.append('date')
+    for c in cols:
+        if c not in final_cols:
+            final_cols.append(c)
+    df = df[final_cols]
 
     return df
 
 # ---------------- Main execution ----------------
 if not SHEET_ID:
-    st.info("Enter your Google Sheet ID to load data (the long ID between /d/ and /edit in the URL).")
+    st.info("Enter your Google Sheet ID (the long ID between /d/ and /edit in the URL).")
     st.stop()
 
 with st.spinner("🔄 Fetching data from Google Sheets..."):
@@ -263,8 +312,8 @@ if df_raw.empty:
 
 st.success(f"✅ Loaded data — {len(df_raw):,} rows, {df_raw.shape[1]} columns.")
 
-# Convert column types (amounts -> Int64) and add date/timestamp columns
-converted_df = convert_column_types_to_integer_with_date(df_raw)
+# Convert column types (amounts -> Int64), and ensure single date/timestamp columns
+converted_df = convert_column_types_to_integer_with_single_date_and_timestamp(df_raw)
 
 # Show top 10 rows and data types
 st.subheader("Top 10 rows (after type conversion)")
@@ -298,4 +347,4 @@ if 'date' in converted_df.columns:
 
 # Download cleaned CSV
 csv_bytes = converted_df.to_csv(index=False).encode('utf-8')
-st.download_button("⬇️ Download Converted CSV (Amounts as integer)", data=csv_bytes, file_name="sheet_converted_integer_amounts_with_date.csv", mime="text/csv")
+st.download_button("⬇️ Download Converted CSV (Amounts as integer)", data=csv_bytes, file_name="sheet_converted_integer_amounts_with_single_date_timestamp.csv", mime="text/csv")
