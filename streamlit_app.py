@@ -628,4 +628,158 @@ with c1:
 with c2:
     matplotlib_daily_spend_consistent(merged, y_max=y_max)
 
+# ---- Unified, dtype-safe daily aggregation + both plotters (Plotly + Matplotlib) ----
+import numpy as np
+import plotly.express as px
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
+
+def compute_daily_totals_consistent(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute daily totals and return a DataFrame with:
+      - Date (datetime64[ns], midnight)
+      - Total_Spent (float64)
+      - Total_Credit (float64)
+    Ensures numeric dtypes are native numpy types (no pandas extension Int64).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['Date','Total_Spent','Total_Credit'])
+
+    w = df.copy()
+
+    # choose grouping date
+    if 'date' in w.columns and w['date'].notna().any():
+        grp = pd.to_datetime(w['date']).dt.normalize()
+    elif 'timestamp' in w.columns and w['timestamp'].notna().any():
+        grp = pd.to_datetime(w['timestamp']).dt.normalize()
+    else:
+        found = None
+        for c in w.columns:
+            if pd.api.types.is_datetime64_any_dtype(w[c]) and w[c].notna().any():
+                found = c; break
+        if found:
+            grp = pd.to_datetime(w[found]).dt.normalize()
+        else:
+            return pd.DataFrame(columns=['Date','Total_Spent','Total_Credit'])
+
+    w['_group_date'] = grp
+
+    # ensure Amount_numeric as float64
+    if 'Amount' in w.columns:
+        w['Amount_numeric'] = pd.to_numeric(w['Amount'], errors='coerce').fillna(0.0).astype('float64')
+    else:
+        # fallback: pick any numeric-like column
+        numeric_cols = [c for c in w.columns if pd.api.types.is_integer_dtype(w[c]) or pd.api.types.is_float_dtype(w[c])]
+        if numeric_cols:
+            w['Amount_numeric'] = pd.to_numeric(w[numeric_cols[0]], errors='coerce').fillna(0.0).astype('float64')
+        else:
+            w['Amount_numeric'] = 0.0
+
+    # compute debit/credit or overall
+    if 'Type' in w.columns and w['Type'].astype(str).str.strip().any():
+        w['Type_norm'] = w['Type'].astype(str).str.lower().str.strip()
+        debit_df = w[w['Type_norm'] == 'debit']
+        credit_df = w[w['Type_norm'] == 'credit']
+
+        daily_spend = (debit_df.groupby(debit_df['_group_date'])['Amount_numeric']
+                       .sum().reset_index().rename(columns={'_group_date':'Date','Amount_numeric':'Total_Spent'}))
+        daily_credit = (credit_df.groupby(credit_df['_group_date'])['Amount_numeric']
+                        .sum().reset_index().rename(columns={'_group_date':'Date','Amount_numeric':'Total_Credit'}))
+    else:
+        daily_spend = (w.groupby(w['_group_date'])['Amount_numeric']
+                       .sum().reset_index().rename(columns={'_group_date':'Date','Amount_numeric':'Total_Spent'}))
+        daily_credit = pd.DataFrame(columns=['Date','Total_Credit'])
+
+    merged = pd.merge(daily_spend, daily_credit, on='Date', how='outer').fillna(0)
+    merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
+
+    # convert to native numeric dtypes (float64) to avoid Plotly issues with pandas extension types
+    merged['Total_Spent'] = merged['Total_Spent'].astype('float64')
+    merged['Total_Credit'] = merged.get('Total_Credit', 0).astype('float64') if 'Total_Credit' in merged else np.array([0.0]*len(merged), dtype='float64')
+
+    merged = merged.sort_values('Date').reset_index(drop=True)
+    return merged
+
+def plotly_daily_spend_consistent(merged_df: pd.DataFrame, y_max: float = None):
+    if merged_df is None or merged_df.empty:
+        st.info("No daily data to plot (Plotly).")
+        return
+
+    # prepare melted dataframe and ensure Amount is float
+    plot_df = merged_df.melt(id_vars='Date', value_vars=['Total_Spent','Total_Credit'], var_name='Type', value_name='Amount')
+    plot_df['Amount'] = pd.to_numeric(plot_df['Amount'], errors='coerce').fillna(0.0).astype('float64')
+    # drop zero-credit series if all zero
+    if plot_df[(plot_df['Type']=='Total_Credit')]['Amount'].sum() == 0:
+        plot_df = plot_df[plot_df['Type']!='Total_Credit']
+
+    # create fig
+    fig = px.line(plot_df, x='Date', y='Amount', color='Type', markers=True, title="Daily Spend and Credit — Plotly")
+    fig.update_traces(mode='lines+markers', marker={'size':6})
+    fig.update_layout(template='plotly_white', xaxis_title='Date', yaxis_title='Amount', legend_title='Type', hovermode='x unified')
+
+    # enforce same y-range if passed
+    if y_max is not None:
+        fig.update_yaxes(range=[0, float(y_max)*1.05])
+
+    # format hover and y tick formatting
+    fig.update_traces(hovertemplate='%{x|%Y-%m-%d}: %{y:.0f}')
+    fig.update_yaxes(tickformat=",")  # thousand separators
+    st.plotly_chart(fig, use_container_width=True)
+
+def matplotlib_daily_spend_consistent(merged_df: pd.DataFrame, y_max: float = None):
+    if merged_df is None or merged_df.empty:
+        st.info("No daily data to plot (Matplotlib).")
+        return
+
+    x = pd.to_datetime(merged_df['Date'])
+    fig, ax = plt.subplots(figsize=(9,3.5), dpi=100)
+
+    ax.plot(x, merged_df['Total_Spent'], marker='o', linestyle='-', linewidth=2, label='Total_Spent')
+    if merged_df['Total_Credit'].sum() != 0:
+        ax.plot(x, merged_df['Total_Credit'], marker='o', linestyle='--', linewidth=2, label='Total_Credit')
+
+    ax.set_title("Daily Spend and Credit — Matplotlib")
+    ax.set_xlabel('Date'); ax.set_ylabel('Amount')
+    ax.grid(axis='y', alpha=0.25)
+
+    locator = mdates.AutoDateLocator()
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator); ax.xaxis.set_major_formatter(formatter)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+
+    if y_max is not None:
+        ax.set_ylim(0, float(y_max)*1.05)
+
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda val, pos: f"{int(val):,}"))
+    ax.legend(loc='upper left')
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+# --- compute merged and show diagnostics and charts ---
+merged = compute_daily_totals_consistent(converted_df)
+
+st.subheader("Daily totals (merged) — top rows")
+st.write(merged.head(10))
+
+st.subheader("Daily totals description")
+try:
+    st.write(merged[['Total_Spent','Total_Credit']].describe().applymap(lambda x: float(x) if pd.notna(x) else x))
+except Exception:
+    st.write("Describe unavailable (empty)")
+
+# unified y_max
+if not merged.empty:
+    y_max = max(float(merged['Total_Spent'].max(skipna=True)), float(merged['Total_Credit'].max(skipna=True)))
+else:
+    y_max = None
+
+c1, c2 = st.columns([1,1])
+with c1:
+    plotly_daily_spend_consistent(merged, y_max=y_max)
+with c2:
+    matplotlib_daily_spend_consistent(merged, y_max=y_max)
+
+
 
