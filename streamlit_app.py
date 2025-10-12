@@ -7,7 +7,7 @@ Features:
 - Normalize columns: Amount -> rounded Int64; detect timestamp + date
 - Compute daily totals (Total_Spent / Total_Credit)
 - Sidebar filters: Year, Month(s), Series (debit/credit)
-- Sidebar date selector (shows corresponding table rows below chart)
+- Sidebar date selector (real calendar) that shows corresponding table rows below chart
 - Optional Plotly "click-to-select" mode (requires `streamlit-plotly-events` package)
 - Altair chart used by default (fast, interactive); Plotly used only when click-to-select toggled
 """
@@ -63,8 +63,7 @@ with st.sidebar:
     show_credit = st.checkbox("Credit (Total_Credit)", value=True)
 
     st.markdown("---")
-    st.write("Date selection (click-to-select will override this when used)")
-    # placeholder for date selector; will be populated later after data loads
+    # placeholder for date selector; will be populated later after data loads (kept for UX continuity)
     selected_date_sidebar = st.empty()
 
     st.markdown("---")
@@ -325,15 +324,16 @@ converted_df = convert_columns_and_derives(df_raw)
 # compute merged daily totals
 merged = compute_daily_totals(converted_df)
 
-# ---------------- Sidebar: Year/Month filters & date selector population ----------------
+# ---------------- Sidebar: Year/Month filters & calendar-based date selector ----------------
 with st.sidebar:
-    # year choices
     if not merged.empty:
         merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
+        # Year selection
         years = sorted(merged['Date'].dt.year.unique().tolist())
         years_opts = ['All'] + [str(y) for y in years]
         sel_year = st.selectbox("Year", years_opts, index=0)
-        # months in selected year
+
+        # Month(s) selection (dependent on year)
         if sel_year == 'All':
             month_frame = merged.copy()
         else:
@@ -342,19 +342,42 @@ with st.sidebar:
         month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}
         month_choices = [month_map[m] for m in month_nums]
         sel_months = st.multiselect("Month(s)", options=month_choices, default=month_choices)
-        # populate date selector: show dates matching current year/month filter
-        # map back names to numbers for selection
-        inv_map = {v:k for k,v in month_map.items()}
+
+        # Build date range matching the year/month filter (for calendar bounds)
+        inv_map = {v: k for k, v in month_map.items()}
         selected_month_nums = [inv_map[m] for m in sel_months] if sel_months else []
         filter_dates = merged.copy()
         if sel_year != 'All':
             filter_dates = filter_dates[filter_dates['Date'].dt.year == int(sel_year)]
         if selected_month_nums:
             filter_dates = filter_dates[filter_dates['Date'].dt.month.isin(selected_month_nums)]
-        date_options = ['All'] + [d.date().isoformat() for d in filter_dates['Date'].dt.to_pydatetime()]
-        # unique + sorted
-        date_options = sorted(list(dict.fromkeys(date_options)))
-        sel_date = st.selectbox("Select date to show rows", options=date_options, index=0)
+
+        # compute min/max date for the calendar bounds, fallback to whole merged range
+        if not filter_dates.empty:
+            date_min = filter_dates['Date'].min().date()
+            date_max = filter_dates['Date'].max().date()
+        else:
+            date_min = merged['Date'].min().date()
+            date_max = merged['Date'].max().date()
+
+        # allow "Show all dates" or use calendar
+        show_all_dates = st.checkbox("Show all dates (no calendar filter)", value=False)
+        if not show_all_dates:
+            # default to date_min
+            try:
+                default_date = date_min
+                selected_date_obj = st.date_input(
+                    "Select date to show rows (calendar)",
+                    value=default_date,
+                    min_value=date_min,
+                    max_value=date_max
+                )
+                sel_date = selected_date_obj.isoformat()
+            except Exception:
+                # if something goes wrong with calendar bounds, fallback to 'All'
+                sel_date = 'All'
+        else:
+            sel_date = 'All'
     else:
         sel_year = 'All'
         sel_months = []
@@ -413,7 +436,6 @@ else:
                 # try to extract x value robustly
                 first = res[0]
                 xval = first.get('x') or first.get('x_val') or first.get('bbox', {}).get('x')
-                # fallback: 'pointNumber' or 'pointIndex' not helpful; xval may be ISO string
                 try:
                     if xval is not None:
                         clicked_date = pd.to_datetime(xval).date()
@@ -436,13 +458,12 @@ else:
 
         # Determine selected date: priority order
         # 1) if Plotly click produced a date -> use it
-        # 2) else if user selected a date in sidebar -> use that
+        # 2) else if user selected a date in sidebar calendar -> use that
         # 3) else 'All'
         selected_date_value = None
         if clicked_date is not None:
             selected_date_value = clicked_date
         else:
-            # use sel_date from sidebar
             if sel_date != 'All':
                 try:
                     selected_date_value = pd.to_datetime(sel_date).date()
@@ -451,10 +472,6 @@ else:
             else:
                 selected_date_value = None
 
-        # Show note to user when click-mode is not available
-        if enable_plotly_click and not _plotly_events_available:
-            st.info("Plotly click-mode was requested but `streamlit-plotly-events` is not installed. Install it with `pip install streamlit-plotly-events` to enable click-to-select.")
-
         # Show selection info
         if selected_date_value is not None:
             st.markdown(f"**Showing rows for date:** {selected_date_value.isoformat()}")
@@ -462,7 +479,6 @@ else:
             st.markdown("**Showing rows for:** All dates (filtered by Year/Month)")
 
         # ---------------- Show table of underlying rows filtered by the selected date and sidebar filters ----------------
-        # Filter converted_df by the same Year/Month filters, then by selected date if provided
         rows_df = converted_df.copy()
 
         # convert timestamp to datetime, ensure date col exists
@@ -496,7 +512,6 @@ else:
         if rows_df.empty:
             st.write("No rows match the current filters/selection.")
         else:
-            # show all columns but limit rows to a reasonable number first; provide an expand option
             st.dataframe(rows_df.reset_index(drop=True))
 
 # End of file
