@@ -1,10 +1,10 @@
 # streamlit_app.py
 """
-Single-file Streamlit app (no charts):
+Single-file Streamlit app (no charts) — Amounts as integers:
 - Connects to Google Sheets via service account (st.secrets or file)
 - Converts sheet values to a pandas DataFrame
 - Auto-converts columns to inferred types (dates / numeric)
-- Converts amount-like column(s) to numeric and rounds values to 2 decimals
+- Converts amount-like column(s) to integer (rounded) using pandas nullable Int64
 - Shows top 10 rows and column data types
 - Offers cleaned CSV download
 """
@@ -19,8 +19,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Google Sheet Connector — Read & Type Convert", layout="wide")
-st.title("🔐 Google Sheet Connector — Read & Convert Types (No Charts)")
+st.set_page_config(page_title="Google Sheet Connector — Amounts as Integer", layout="wide")
+st.title("🔐 Google Sheet Connector — Convert Types (Amounts → Integer)")
 
 # ---------------- Sidebar Inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -123,13 +123,13 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# ---------------- Column type conversion utility ----------------
-def convert_column_types(df: pd.DataFrame, round_decimals: int = 2) -> pd.DataFrame:
+# ---------------- Column type conversion utility (Amounts -> integer) ----------------
+def convert_column_types_to_integer(df: pd.DataFrame) -> pd.DataFrame:
     """
     Heuristically convert columns:
       - parse columns with names containing date/time keywords to datetime
-      - coerce amount-like columns to numeric and round to `round_decimals`
-      - attempt to convert other numeric-looking columns
+      - coerce amount-like columns to integer (rounded) using pandas 'Int64' dtype
+      - attempt to convert other numeric-looking columns (rounded to integer)
     Returns a new DataFrame with converted columns.
     """
     if df is None or df.empty:
@@ -141,36 +141,43 @@ def convert_column_types(df: pd.DataFrame, round_decimals: int = 2) -> pd.DataFr
     df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
 
     date_keywords = ['date', 'time', 'timestamp', 'datetime', 'txn']
-    num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit']
+    num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit', 'spent']
 
-    # First pass: convert obvious date columns (including Unnamed: 0)
+    # 1) Convert obvious date columns (including Unnamed: 0)
     for col in df.columns:
         lname = str(col).lower()
         if any(k in lname for k in date_keywords) or str(col).lower().startswith("unnamed"):
             df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
 
-    # Second pass: numeric/amount columns
+    # 2) Convert amount-like columns to numeric, round, and cast to nullable integer
     amount_columns = []
     for col in df.columns:
         lname = str(col).lower()
         if any(k in lname for k in num_keywords):
-            # strip non-digit characters and coerce
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
-            df[col] = df[col].round(round_decimals)
+            # strip non-digit characters and coerce to float, then round and cast to Int64
+            coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
+            # round to nearest integer
+            coerced = coerced.round(0)
+            # convert to pandas nullable integer (Int64) preserving NaNs
+            coerced_int = coerced.astype('Int64')
+            df[col] = coerced_int
             amount_columns.append(col)
 
-    # Third pass: any remaining object columns that look numeric (try coercion)
+    # 3) Try to coerce other object columns that look numeric (use sample heuristic)
     for col in df.columns:
         if pd.api.types.is_object_dtype(df[col]):
             sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
-            # if sample has at least 3 parseable numbers, coerce whole column
             parsed = pd.to_numeric(sample, errors='coerce')
             if parsed.notna().sum() >= 3:
-                df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce').round(round_decimals)
+                coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
+                coerced = coerced.round(0)
+                df[col] = coerced.astype('Int64')
 
-    # If an Amount-like column name exists (prefer exact 'Amount' else choose first detected), normalize to 'Amount'
+    # 4) Standardize preferred amount column name => 'Amount' (if possible)
     preferred = None
-    for candidate in ['Amount', 'amount', 'total_spent', 'totalspent', 'total', 'txn amount', 'value']:
+    # preferred candidates in order
+    candidates = ['Amount', 'amount', 'total_spent', 'totalspent', 'total', 'txn amount', 'value', 'spent']
+    for candidate in candidates:
         for col in df.columns:
             if str(col).lower() == str(candidate).lower():
                 preferred = col
@@ -181,12 +188,16 @@ def convert_column_types(df: pd.DataFrame, round_decimals: int = 2) -> pd.DataFr
         preferred = amount_columns[0]
 
     if preferred and preferred != 'Amount':
-        # rename preserved original column to standardized 'Amount' (only if 'Amount' not present)
+        # rename to 'Amount' if that name is not already present
         if 'Amount' not in df.columns:
             df.rename(columns={preferred: 'Amount'}, inplace=True)
             preferred = 'Amount'
 
-    # Final: return df with converted types
+    # If we have an Amount column, ensure it's Int64 (if not already)
+    if 'Amount' in df.columns and not pd.api.types.is_integer_dtype(df['Amount']):
+        # try to coerce safely to Int64
+        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').round(0).astype('Int64')
+
     return df
 
 # ---------------- Main execution ----------------
@@ -210,26 +221,32 @@ if df_raw.empty:
 
 st.success(f"✅ Loaded data — {len(df_raw):,} rows, {df_raw.shape[1]} columns.")
 
-# Convert column types and round amount-like columns
-converted_df = convert_column_types(df_raw, round_decimals=2)
+# Convert column types and coerce amount-like columns to integer (nullable Int64)
+converted_df = convert_column_types_to_integer(df_raw)
 
 # Show top 10 rows and data types
 st.subheader("Top 10 rows (after type conversion)")
 st.write(converted_df.head(10))
 
 st.subheader("Column data types")
-# present dtypes in a neat table
 dt_df = pd.DataFrame({
     "column": converted_df.columns.astype(str),
     "dtype": [str(converted_df[c].dtype) for c in converted_df.columns]
 })
 st.write(dt_df)
 
-# If an 'Amount' column exists, show a small summary (and round-up was already applied)
+# If an 'Amount' column exists, show a small summary and counts of non-null
 if 'Amount' in converted_df.columns:
-    st.subheader("Amount summary")
-    st.write(converted_df['Amount'].describe().apply(lambda x: float(x) if pd.notna(x) else x))
+    st.subheader("Amount summary (Integer, nullable)")
+    amt = converted_df['Amount']
+    # show count of non-null, min/max, mean (mean may be float)
+    st.write({
+        "non_null_count": int(amt.notna().sum()),
+        "min": int(amt.min()) if amt.notna().any() else None,
+        "max": int(amt.max()) if amt.notna().any() else None,
+        "mean": float(amt.dropna().astype(float).mean()) if amt.notna().any() else None
+    })
 
-# Download cleaned CSV (converted types). Numeric/date columns will be represented in CSV accordingly.
+# Download cleaned CSV (converted types). Note: pandas will write Int64 as numbers or empty for NA.
 csv_bytes = converted_df.to_csv(index=False).encode('utf-8')
-st.download_button("⬇️ Download Converted CSV", data=csv_bytes, file_name="sheet_converted.csv", mime="text/csv")
+st.download_button("⬇️ Download Converted CSV (Amounts as integer)", data=csv_bytes, file_name="sheet_converted_integer_amounts.csv", mime="text/csv")
