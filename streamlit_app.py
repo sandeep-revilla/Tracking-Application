@@ -358,7 +358,7 @@ st.markdown("### Select series to display")
 show_debit = st.checkbox("Show debit (Total_Spent)", value=True)
 show_credit = st.checkbox("Show credit (Total_Credit)", value=True)
 
-# build long-form df for Altair (REPLACEMENT: normalizes Date & numeric dtypes; fixes axis)
+# build long-form df for Altair (FIXED: show all by default; legend-click highlights)
 # ensure merged Date/dtypes are normalized & sorted
 merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
 merged = merged.sort_values('Date').reset_index(drop=True)
@@ -391,8 +391,8 @@ else:
         x_min = plot_df['Date'].min()
         x_max = plot_df['Date'].max()
 
-        # Altair selection + chart (fixed axis formatting)
-        selection = alt.selection_multi(fields=['Type'], bind='legend')
+        # selection bound to legend — used to change opacity (highlight) but not to filter out rows
+        legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
 
         x_axis = alt.X(
             'Date:T',
@@ -420,15 +420,13 @@ else:
                     alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
                     alt.Tooltip('Type:N', title='Type'),
                     alt.Tooltip('Amount:Q', title='Amount', format=',')
-                ]
+                ],
+                # change opacity to highlight the selected legend item; if none selected, show all at 1.0
+                opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
             )
-            .add_selection(selection)
-            .transform_filter(selection)   # legend-click also toggles
+            .add_selection(legend_sel)
             .properties(title="Daily Spend and Credit — Altair", height=450)
-            .interactive()  # enables pan & zoom
+            .interactive()
         )
 
-        st.altair_chart(chart, use_container_width=True)
-
-
-# end of file
+        st.altair_chart(chart, u_
