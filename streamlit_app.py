@@ -5,7 +5,11 @@ Single-file Streamlit app:
 - Converts columns: amounts -> rounded nullable Int64; detects timestamp & date
 - Produces a single canonical `timestamp` (datetime64[ns]) and `date` (python.date)
 - Aggregates daily totals (Total_Spent / Total_Credit)
-- Simple Altair chart (default axis formatting — scientific notation allowed)
+- Interactive Altair chart with:
+    * debit (red) and credit (green)
+    * year + month filters
+    * checkboxes to include series
+    * legend-click highlight (opacity)
 - Diagnostics: top rows + merged.describe()
 """
 
@@ -22,8 +26,8 @@ from googleapiclient.errors import HttpError
 import altair as alt
 
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Sheet → Daily Spend (Altair simple)", layout="wide")
-st.title("💳 Daily Spending — Altair (simple axis formatting)")
+st.set_page_config(page_title="Sheet → Daily Spend (Altair)", layout="wide")
+st.title("💳 Daily Spending — Altair (red/green + year/month filters)")
 
 # ---------------- Sidebar inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -36,7 +40,7 @@ CREDS_FILE = st.sidebar.text_input("Service Account JSON File (optional)", value
 if st.sidebar.button("Refresh Now"):
     st.experimental_rerun()
 
-# ---------------- Helpers: parse secret & sheets client ----------------
+# ---------------- Helpers ----------------
 def parse_service_account_secret(raw: Any) -> Dict:
     if isinstance(raw, dict):
         return raw
@@ -65,7 +69,6 @@ def build_sheets_service_from_file(creds_file: str):
     creds = service_account.Credentials.from_service_account_file(creds_file, scopes=scopes)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-# ---------------- Safe conversion from sheet values -> DataFrame ----------------
 def _normalize_rows(values: List[List[str]]) -> Tuple[List[str], List[List]]:
     if not values:
         return [], []
@@ -100,7 +103,6 @@ def values_to_dataframe(values: List[List[str]]) -> pd.DataFrame:
             df.columns = header
         return df
 
-# ---------------- Read Google Sheet ----------------
 @st.cache_data(ttl=300)
 def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional[Dict] = None, creds_file: Optional[str] = None) -> pd.DataFrame:
     if creds_info is None and (creds_file is None or not os.path.exists(creds_file)):
@@ -116,7 +118,7 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# ---------------- Column conversion utility ----------------
+# ---------------- Convert & derive ----------------
 def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -293,10 +295,9 @@ if df_raw.empty:
 
 st.success(f"Loaded {len(df_raw):,} rows, {df_raw.shape[1]} columns.")
 
-# Convert & derive
 converted_df = convert_columns_and_derives(df_raw)
 
-# Diagnostics: show top rows and dtypes
+# Diagnostics
 st.subheader("Top 10 rows (after conversion)")
 st.write(converted_df.head(10))
 
@@ -324,8 +325,9 @@ st.write("date non-null:", int(converted_df['date'].notna().sum()))
 st.download_button("⬇️ Download converted CSV", data=converted_df.to_csv(index=False).encode('utf-8'),
                    file_name="converted_sheet.csv", mime="text/csv")
 
-# ---------------- Aggregation & plotting ----------------
+# ---------------- Aggregation ----------------
 merged = compute_daily_totals(converted_df)
+
 st.subheader("Daily totals (merged) — top rows")
 st.write(merged.head(10))
 
@@ -335,52 +337,103 @@ try:
 except Exception:
     st.write("No daily totals to describe.")
 
-# interactive checkboxes to select series
+# ---------------- Year & Month filters ----------------
+if not merged.empty:
+    merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
+    years = sorted(merged['Date'].dt.year.unique().tolist())
+    years_opts = ['All'] + [str(y) for y in years]
+    sel_year = st.selectbox("Select year", years_opts, index=0)
+
+    # months available in the selected year (if year selected)
+    if sel_year == 'All':
+        month_frame = merged.copy()
+    else:
+        month_frame = merged[merged['Date'].dt.year == int(sel_year)]
+
+    # month list in calendar order
+    month_nums = month_frame['Date'].dt.month.unique().tolist()
+    month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}
+    month_choices = [month_map[m] for m in sorted(month_nums)]
+    # default select all months found
+    sel_months = st.multiselect("Select month(s)", options=month_choices, default=month_choices)
+
+else:
+    sel_year = 'All'
+    sel_months = []
+
+# ---------------- Series checkboxes ----------------
 st.markdown("### Select series to display")
 show_debit = st.checkbox("Show debit (Total_Spent)", value=True)
 show_credit = st.checkbox("Show credit (Total_Credit)", value=True)
 
-# prepare plot DataFrame
-merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
-merged = merged.sort_values('Date').reset_index(drop=True)
-merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
-merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
-
+# ---------------- Prepare plot DataFrame (apply filters) ----------------
 plot_df = merged.copy()
+
+# apply year filter
+if sel_year != 'All':
+    try:
+        plot_df = plot_df[plot_df['Date'].dt.year == int(sel_year)]
+    except Exception:
+        pass
+
+# apply month filter
+if sel_months:
+    # map back month names to month numbers
+    inv_map = {v: k for k, v in month_map.items()}
+    selected_month_nums = [inv_map[m] for m in sel_months if m in inv_map]
+    if selected_month_nums:
+        plot_df = plot_df[plot_df['Date'].dt.month.isin(selected_month_nums)]
+
+# sort and ensure numeric
+plot_df = plot_df.sort_values('Date').reset_index(drop=True)
+plot_df['Total_Spent'] = pd.to_numeric(plot_df.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
+plot_df['Total_Credit'] = pd.to_numeric(plot_df.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
+
+st.write("MERGED sample (top 10) after filters:")
+st.write(plot_df.head(10))
+
+# ---------------- Altair plotting ----------------
 if plot_df.empty:
-    st.info("No daily totals available to plot.")
+    st.info("No daily totals available to plot for the selected filters.")
 else:
     plot_df_long = plot_df.melt(id_vars='Date', value_vars=['Total_Spent', 'Total_Credit'],
                                 var_name='Type', value_name='Amount').sort_values('Date')
 
-    selected = []
-    if show_debit: selected.append('Total_Spent')
-    if show_credit: selected.append('Total_Credit')
+    # apply series checkboxes
+    selected_series = []
+    if show_debit: selected_series.append('Total_Spent')
+    if show_credit: selected_series.append('Total_Credit')
 
-    if not selected:
+    if not selected_series:
         st.info("Select at least one series to display.")
     else:
-        plot_df_long = plot_df_long[plot_df_long['Type'].isin(selected)].copy()
+        plot_df_long = plot_df_long[plot_df_long['Type'].isin(selected_series)].copy()
         plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
         plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
 
-        # simple Altair chart — default axis formatting (scientific notation will appear if relevant)
-        selection = alt.selection_multi(fields=['Type'], bind='legend')
-        chart = (
-            alt.Chart(plot_df_long)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X('Date:T', title='Date'),
-                y=alt.Y('Amount:Q', title='Amount'),  # default formatting (allows scientific notation)
-                color=alt.Color('Type:N', title='Type'),
-                tooltip=[alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
-                         alt.Tooltip('Type:N', title='Type'),
-                         alt.Tooltip('Amount:Q', title='Amount')]
-            )
-            .add_selection(selection)
-            .transform_filter(selection)  # legend click filters series
-            .properties(title="Daily Spend and Credit — Altair (simple axes)", height=450)
-            .interactive()
-        )
+        # Legend selection will highlight (opacity) rather than filter
+        legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
+
+        # color mapping: debit (Total_Spent) -> red, credit (Total_Credit) -> green
+        color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#d62728', '#2ca02c'])
+
+        base = alt.Chart(plot_df_long).encode(
+            x=alt.X('Date:T', title='Date'),
+            y=alt.Y('Amount:Q', title='Amount', axis=alt.Axis(format=",.0f")),
+            color=alt.Color('Type:N', title='Type', scale=color_scale),
+            tooltip=[
+                alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
+                alt.Tooltip('Type:N', title='Type'),
+                alt.Tooltip('Amount:Q', title='Amount', format=',')
+            ],
+            opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
+        ).add_selection(legend_sel)
+
+        line = base.mark_line(point=False).encode()
+        points = base.mark_point(filled=True, size=40).encode()
+
+        chart = (line + points).properties(title="Daily Spend and Credit — Altair", height=450).interactive()
 
         st.altair_chart(chart, use_container_width=True)
+
+# End of file
