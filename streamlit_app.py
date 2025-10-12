@@ -5,10 +5,10 @@ Single-file Streamlit app:
 - Converts columns: amounts -> rounded nullable Int64; detects timestamp & date
 - Produces a single canonical `timestamp` (datetime64[ns]) and `date` (python.date)
 - Aggregates daily totals (Total_Spent / Total_Credit)
-- Interactive Altair chart with checkbox filters (legend-click highlights)
+- Simple Altair chart (default axis formatting — scientific notation allowed)
 - Diagnostics: top rows + merged.describe()
 """
-#
+
 import streamlit as st
 import pandas as pd
 import json
@@ -21,11 +21,11 @@ from googleapiclient.errors import HttpError
 
 import altair as alt
 
-# --------------- Page config ---------------
-st.set_page_config(page_title="Sheet → Daily Spend (Altair)", layout="wide")
-st.title("💳 Daily Spending — Altair interactive (no Plotly)")
+# ---------------- Page config ----------------
+st.set_page_config(page_title="Sheet → Daily Spend (Altair simple)", layout="wide")
+st.title("💳 Daily Spending — Altair (simple axis formatting)")
 
-# --------------- Sidebar inputs ---------------
+# ---------------- Sidebar inputs ----------------
 SHEET_ID = st.sidebar.text_input(
     "Google Sheet ID (between /d/ and /edit)",
     value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk"
@@ -36,7 +36,7 @@ CREDS_FILE = st.sidebar.text_input("Service Account JSON File (optional)", value
 if st.sidebar.button("Refresh Now"):
     st.experimental_rerun()
 
-# --------------- Helpers: parse secret & sheets client ---------------
+# ---------------- Helpers: parse secret & sheets client ----------------
 def parse_service_account_secret(raw: Any) -> Dict:
     if isinstance(raw, dict):
         return raw
@@ -65,7 +65,7 @@ def build_sheets_service_from_file(creds_file: str):
     creds = service_account.Credentials.from_service_account_file(creds_file, scopes=scopes)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-# --------------- Safe conversion from sheet values -> DataFrame ---------------
+# ---------------- Safe conversion from sheet values -> DataFrame ----------------
 def _normalize_rows(values: List[List[str]]) -> Tuple[List[str], List[List]]:
     if not values:
         return [], []
@@ -100,7 +100,7 @@ def values_to_dataframe(values: List[List[str]]) -> pd.DataFrame:
             df.columns = header
         return df
 
-# --------------- Read Google Sheet ---------------
+# ---------------- Read Google Sheet ----------------
 @st.cache_data(ttl=300)
 def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional[Dict] = None, creds_file: Optional[str] = None) -> pd.DataFrame:
     if creds_info is None and (creds_file is None or not os.path.exists(creds_file)):
@@ -116,7 +116,7 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# --------------- Column conversion utility ---------------
+# ---------------- Column conversion utility ----------------
 def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -233,7 +233,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     df = df[final_cols]
     return df
 
-# --------------- Daily aggregation (dtype-safe) ---------------
+# ---------------- Daily aggregation ----------------
 def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=['Date','Total_Spent','Total_Credit'])
@@ -255,7 +255,6 @@ def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
     w['_group_date'] = grp
     w['Amount_numeric'] = pd.to_numeric(w.get('Amount', 0), errors='coerce').fillna(0.0).astype('float64')
 
-    # split by type if present
     if 'Type' in w.columns and w['Type'].astype(str).str.strip().any():
         w['Type_norm'] = w['Type'].astype(str).str.lower().str.strip()
         debit_df = w[w['Type_norm'] == 'debit']
@@ -273,7 +272,7 @@ def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
     merged = merged.sort_values('Date').reset_index(drop=True)
     return merged
 
-# --------------- Main flow ---------------
+# ---------------- Main flow ----------------
 if not SHEET_ID:
     st.info("Enter your Google Sheet ID to load data.")
     st.stop()
@@ -325,7 +324,7 @@ st.write("date non-null:", int(converted_df['date'].notna().sum()))
 st.download_button("⬇️ Download converted CSV", data=converted_df.to_csv(index=False).encode('utf-8'),
                    file_name="converted_sheet.csv", mime="text/csv")
 
-# --------------- Aggregation & plotting ---------------
+# ---------------- Aggregation & plotting ----------------
 merged = compute_daily_totals(converted_df)
 st.subheader("Daily totals (merged) — top rows")
 st.write(merged.head(10))
@@ -341,29 +340,12 @@ st.markdown("### Select series to display")
 show_debit = st.checkbox("Show debit (Total_Spent)", value=True)
 show_credit = st.checkbox("Show credit (Total_Credit)", value=True)
 
-# --- START: REPLACEMENT Altair plotting block (fixed) ---
-# ensure merged Date/dtypes are normalized & sorted
+# prepare plot DataFrame
 merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
 merged = merged.sort_values('Date').reset_index(drop=True)
-
-# ensure numeric native dtypes (float64) to avoid weird formatting issues
 merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
 merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
 
-# small diagnostics
-st.write("MERGED sample (top 10):")
-st.write(merged.head(10))
-
-st.write("Date stats:")
-try:
-    st.write("min:", merged['Date'].min(), "max:", merged['Date'].max(), "nunique:", merged['Date'].nunique())
-except Exception as e:
-    st.write("Could not compute Date stats:", e)
-
-st.write("Merged dtypes:")
-st.write(merged.dtypes)
-
-# prepare long-form DF
 plot_df = merged.copy()
 if plot_df.empty:
     st.info("No daily totals available to plot.")
@@ -371,7 +353,6 @@ else:
     plot_df_long = plot_df.melt(id_vars='Date', value_vars=['Total_Spent', 'Total_Credit'],
                                 var_name='Type', value_name='Amount').sort_values('Date')
 
-    # apply checkbox filters
     selected = []
     if show_debit: selected.append('Total_Spent')
     if show_credit: selected.append('Total_Credit')
@@ -383,65 +364,23 @@ else:
         plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
         plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
 
-        # compute x domain safely (expand if single date) and convert to ISO strings for Altair
-        x_min = plot_df['Date'].min()
-        x_max = plot_df['Date'].max()
-        if pd.isna(x_min) or pd.isna(x_max):
-            x_domain = None
-        else:
-            if x_min == x_max:
-                x_min = pd.to_datetime(x_min) - pd.Timedelta(days=1)
-                x_max = pd.to_datetime(x_max) + pd.Timedelta(days=1)
-            else:
-                x_min = pd.to_datetime(x_min)
-                x_max = pd.to_datetime(x_max)
-            # IMPORTANT: use ISO strings so Vega/Altair serializes domain correctly
-            x_domain = [x_min.isoformat(), x_max.isoformat()]
-
-        # legend selection highlights (doesn't filter rows)
-        legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
-
-        # create x_axis with scale only when domain is valid
-        if x_domain is not None:
-            x_axis = alt.X(
-                'Date:T',
-                title='Date',
-                axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45),
-                scale=alt.Scale(domain=x_domain)
+        # simple Altair chart — default axis formatting (scientific notation will appear if relevant)
+        selection = alt.selection_multi(fields=['Type'], bind='legend')
+        chart = (
+            alt.Chart(plot_df_long)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X('Date:T', title='Date'),
+                y=alt.Y('Amount:Q', title='Amount'),  # default formatting (allows scientific notation)
+                color=alt.Color('Type:N', title='Type'),
+                tooltip=[alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
+                         alt.Tooltip('Type:N', title='Type'),
+                         alt.Tooltip('Amount:Q', title='Amount')]
             )
-        else:
-            x_axis = alt.X(
-                'Date:T',
-                title='Date',
-                axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45)
-            )
-
-        y_axis = alt.Y(
-            'Amount:Q',
-            title='Amount',
-            axis=alt.Axis(format=",.0f")
+            .add_selection(selection)
+            .transform_filter(selection)  # legend click filters series
+            .properties(title="Daily Spend and Credit — Altair (simple axes)", height=450)
+            .interactive()
         )
 
-        color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#1f77b4', '#ff7f0e'])
-
-        # line + points (points make single-day visible)
-        base = alt.Chart(plot_df_long).encode(
-            x=x_axis,
-            y=y_axis,
-            color=alt.Color('Type:N', title='Type', scale=color_scale),
-            tooltip=[
-                alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
-                alt.Tooltip('Type:N', title='Type'),
-                alt.Tooltip('Amount:Q', title='Amount', format=',')
-            ],
-            opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
-        ).add_selection(legend_sel)
-
-        line = base.mark_line(point=False).encode()
-        points = base.mark_point(filled=True, size=40).encode()
-
-        chart = (line + points).properties(title="Daily Spend and Credit — Altair", height=450).interactive()
-
         st.altair_chart(chart, use_container_width=True)
-
-# --- END replacement block ---
