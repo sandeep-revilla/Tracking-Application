@@ -414,5 +414,7 @@ else:
 
         st.altair_chart(chart, use_container_width=True)
 # --- END: REPLACEMENT Altair plotting block ---
+st.write("MERGED HEAD:", merged.head(15))
+st.write("MERGED DTYPE:", merged.dtypes)
 
 # end of file
