@@ -8,7 +8,7 @@ Single-file Streamlit app:
 - Interactive Altair chart with checkbox filters (legend-click highlights)
 - Diagnostics: top rows + merged.describe()
 """
-
+#
 import streamlit as st
 import pandas as pd
 import json
