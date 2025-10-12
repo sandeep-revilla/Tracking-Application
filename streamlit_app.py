@@ -5,7 +5,7 @@ Single-file Streamlit app:
 - Converts sheet values to a safe pandas DataFrame
 - Performs basic cleaning (convert amounts, parse datetimes, infer Type)
 - Shows KPIs + download button
-- Aggregates daily debit/credit totals and plots them with Plotly (no external charts.py)
+- Aggregates daily debit/credit totals and plots them with Matplotlib (in-file)
 - Includes diagnostic output to verify what's being plotted
 """
 
@@ -17,11 +17,13 @@ from typing import List, Tuple, Optional, Any, Dict
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import plotly.express as px
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
 
 # ---------------- Page config ----------------
 st.set_page_config(page_title="Google Sheet Connector (Single File)", layout="wide")
-st.title("🔐 Google Sheet Connector — Single-file version")
+st.title("🔐 Google Sheet Connector — Single-file version (Matplotlib)")
 
 # ---------------- Sidebar Inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -138,7 +140,7 @@ def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df_raw.copy()
-    # normalize column names: strip & lower for easy matching
+    # normalize column names: strip for easy matching
     cols_map = {c: c.strip() for c in df.columns}
     df.rename(columns=cols_map, inplace=True)
 
@@ -152,14 +154,12 @@ def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
         # try fuzzy: any column that looks numeric in first rows
         for c in df.columns:
             sample = df[c].astype(str).head(10).str.replace(r'[^\d\.\-]', '', regex=True)
-            # if at least half parse to numbers, pick it
             parsed = pd.to_numeric(sample, errors='coerce')
             if parsed.notna().sum() >= 3:
                 amount_col = c
                 break
 
     if amount_col:
-        # strip currency symbols and commas, then convert
         df[amount_col] = df[amount_col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
         df["Amount"] = pd.to_numeric(df[amount_col], errors='coerce')
     else:
@@ -178,7 +178,6 @@ def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             df["DateTime"] = pd.to_datetime(df[date_col].astype(str), errors='coerce')
     else:
-        # attempt parsing from any string-like column with date-like strings
         parsed_dt = None
         for c in df.columns:
             if df[c].dtype == object:
@@ -196,7 +195,6 @@ def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     # ensure Type column exists (debit/credit)
     if "Type" not in df.columns:
-        # infer from amount sign: negative -> debit, positive -> credit
         def infer_type(x):
             try:
                 if pd.isna(x):
@@ -208,12 +206,11 @@ def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
                 return ""
         df["Type"] = df["Amount"].apply(infer_type)
     else:
-        # unify type strings
         df["Type"] = df["Type"].astype(str)
 
-    # Suspicious: NaN amounts or very large amounts (threshold can be adjusted)
+    # Suspicious detection
     try:
-        threshold = 1_000_000  # 1 million default suspicious threshold
+        threshold = 1_000_000
         df["Suspicious"] = df["Amount"].apply(lambda x: 1 if (pd.isna(x) or abs(x) >= threshold) else 0)
     except Exception:
         df["Suspicious"] = 0
@@ -221,7 +218,6 @@ def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
     # drop rows with no datetime and no amount
     df = df.loc[~(df["DateTime"].isna() & df["Amount"].isna())].reset_index(drop=True)
 
-    # make Type lowercase for consistent filtering later
     df["Type"] = df["Type"].str.lower()
 
     return df
@@ -233,7 +229,7 @@ if not SHEET_ID:
 
 with st.spinner("🔄 Fetching data from Google Sheets..."):
     try:
-        creds_info = None  # initialize cleanly
+        creds_info = None
         if "gcp_service_account" in st.secrets:
             creds_info = parse_service_account_secret(st.secrets["gcp_service_account"])
         df_raw = read_google_sheet(SHEET_ID, RANGE, creds_info=creds_info, creds_file=CREDS_FILE)
@@ -349,10 +345,18 @@ if 'Total_Spent' in merged.columns:
 # If the merged series is cumulative and you want daily differences, uncomment:
 # merged['Daily_Spent'] = merged['Total_Spent'].diff().fillna(merged['Total_Spent'])
 
-# ---------------- Plot function (in-file) ----------------
-def daily_spend_line_chart(df_plot: pd.DataFrame, debit_col='Total_Spent', credit_col=None):
+# ---------------- Matplotlib plot function (in-file) ----------------
+def format_currency(x, pos):
+    # simple formatter for y-axis (Indian/normal thousand separators)
+    try:
+        return f"{x:,.0f}"
+    except Exception:
+        return str(x)
+
+def daily_spend_matplotlib(df_plot: pd.DataFrame, debit_col='Total_Spent', credit_col=None):
     """
-    In-file Plotly line chart (same behavior as separate charts.py).
+    Matplotlib implementation of the daily spend/credit line chart.
+    Note: Matplotlib charts are static (not as interactive as Plotly).
     """
     if df_plot is None or df_plot.empty:
         st.info("No data to plot.")
@@ -365,38 +369,50 @@ def daily_spend_line_chart(df_plot: pd.DataFrame, debit_col='Total_Spent', credi
         st.error(f"❌ '{debit_col}' column missing from DataFrame.")
         return
 
-    if credit_col and credit_col in df_plot.columns:
-        y_cols = [debit_col, credit_col]
-        title = "💸 Daily Debit and Credit Trend"
-    else:
-        y_cols = [debit_col]
-        title = "💸 Daily Spending Trend"
-
+    # Ensure Date is datetime and sorted
     try:
-        if not pd.api.types.is_datetime64_any_dtype(df_plot['Date']):
-            df_plot = df_plot.copy()
-            df_plot['Date'] = pd.to_datetime(df_plot['Date'])
+        df_plot = df_plot.copy()
+        df_plot['Date'] = pd.to_datetime(df_plot['Date'])
     except Exception:
         pass
+    df_plot = df_plot.sort_values('Date').reset_index(drop=True)
 
-    fig = px.line(
-        df_plot,
-        x='Date',
-        y=y_cols,
-        title=title,
-        markers=True,
-        line_shape='spline'
-    )
-    fig.update_layout(
-        xaxis_title='Date',
-        yaxis_title='Amount (₹)',
-        template='plotly_white',
-        legend_title='Type'
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 4), dpi=100)
+
+    # Plot debit
+    ax.plot(df_plot['Date'], df_plot[debit_col], marker='o', linestyle='-', linewidth=2, label=debit_col)
+
+    # Plot credit if present
+    if credit_col and credit_col in df_plot.columns:
+        ax.plot(df_plot['Date'], df_plot[credit_col], marker='o', linestyle='--', linewidth=2, label=credit_col)
+
+    # Formatting
+    ax.set_title("💸 Daily Debit and Credit Trend", fontsize=14)
+    ax.set_xlabel("Date", fontsize=11)
+    ax.set_ylabel("Amount (₹)", fontsize=11)
+    ax.grid(axis='y', alpha=0.3)
+
+    # Date formatting on x-axis
+    locator = mdates.AutoDateLocator()
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+
+    # Y-axis formatter
+    ax.yaxis.set_major_formatter(FuncFormatter(format_currency))
+
+    # Legend
+    ax.legend(loc='upper left')
+
+    # Tight layout and show
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
 
 # ---------------- Final chart call ----------------
 st.subheader("📊 Daily Spending and Credit Trend")
-daily_spend_line_chart(merged, debit_col='Total_Spent', credit_col='Total_Credit')
+daily_spend_matplotlib(merged, debit_col='Total_Spent', credit_col='Total_Credit')
 
 # ---------------- End ----------------
