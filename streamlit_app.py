@@ -1,12 +1,12 @@
 # streamlit_app.py
 """
-Single-file Streamlit app:
+Single-file Streamlit app (no charts):
 - Connects to Google Sheets via service account (st.secrets or file)
-- Converts sheet values to a safe pandas DataFrame
-- Performs basic cleaning (convert amounts, parse datetimes, infer Type)
-- Shows KPIs + download button
-- Aggregates daily debit/credit totals and plots them with Matplotlib (in-file)
-- Includes diagnostic output to verify what's being plotted
+- Converts sheet values to a pandas DataFrame
+- Auto-converts columns to inferred types (dates / numeric)
+- Converts amount-like column(s) to numeric and rounds values to 2 decimals
+- Shows top 10 rows and column data types
+- Offers cleaned CSV download
 """
 
 import streamlit as st
@@ -17,13 +17,10 @@ from typing import List, Tuple, Optional, Any, Dict
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.ticker import FuncFormatter
 
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Google Sheet Connector (Single File)", layout="wide")
-st.title("🔐 Google Sheet Connector — Single-file version (Matplotlib)")
+st.set_page_config(page_title="Google Sheet Connector — Read & Type Convert", layout="wide")
+st.title("🔐 Google Sheet Connector — Read & Convert Types (No Charts)")
 
 # ---------------- Sidebar Inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -126,100 +123,70 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# ---------------- Basic cleaning function ----------------
-def clean_history_transactions(df_raw: pd.DataFrame) -> pd.DataFrame:
+# ---------------- Column type conversion utility ----------------
+def convert_column_types(df: pd.DataFrame, round_decimals: int = 2) -> pd.DataFrame:
     """
-    A defensive, simple cleaning function. It:
-    - normalizes column names
-    - finds an Amount column and converts to numeric
-    - finds a DateTime/Date column and converts to datetime
-    - ensures a Type column exists (infers from Amount sign if missing)
-    - creates a 'Suspicious' boolean where Amount is unusually large or missing
+    Heuristically convert columns:
+      - parse columns with names containing date/time keywords to datetime
+      - coerce amount-like columns to numeric and round to `round_decimals`
+      - attempt to convert other numeric-looking columns
+    Returns a new DataFrame with converted columns.
     """
-    if df_raw is None or df_raw.empty:
-        return pd.DataFrame()
+    if df is None or df.empty:
+        return df
 
-    df = df_raw.copy()
-    # normalize column names: strip for easy matching
-    cols_map = {c: c.strip() for c in df.columns}
-    df.rename(columns=cols_map, inplace=True)
+    df = df.copy()
 
-    # find amount column candidates
-    amount_col = None
-    for candidate in ["Amount", "amount", "AMOUNT", "Txn Amount", "Value"]:
-        if candidate in df.columns:
-            amount_col = candidate
-            break
-    if amount_col is None:
-        # try fuzzy: any column that looks numeric in first rows
-        for c in df.columns:
-            sample = df[c].astype(str).head(10).str.replace(r'[^\d\.\-]', '', regex=True)
+    # Normalize column names (trim whitespace)
+    df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
+
+    date_keywords = ['date', 'time', 'timestamp', 'datetime', 'txn']
+    num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit']
+
+    # First pass: convert obvious date columns (including Unnamed: 0)
+    for col in df.columns:
+        lname = str(col).lower()
+        if any(k in lname for k in date_keywords) or str(col).lower().startswith("unnamed"):
+            df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
+
+    # Second pass: numeric/amount columns
+    amount_columns = []
+    for col in df.columns:
+        lname = str(col).lower()
+        if any(k in lname for k in num_keywords):
+            # strip non-digit characters and coerce
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
+            df[col] = df[col].round(round_decimals)
+            amount_columns.append(col)
+
+    # Third pass: any remaining object columns that look numeric (try coercion)
+    for col in df.columns:
+        if pd.api.types.is_object_dtype(df[col]):
+            sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
+            # if sample has at least 3 parseable numbers, coerce whole column
             parsed = pd.to_numeric(sample, errors='coerce')
             if parsed.notna().sum() >= 3:
-                amount_col = c
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce').round(round_decimals)
+
+    # If an Amount-like column name exists (prefer exact 'Amount' else choose first detected), normalize to 'Amount'
+    preferred = None
+    for candidate in ['Amount', 'amount', 'total_spent', 'totalspent', 'total', 'txn amount', 'value']:
+        for col in df.columns:
+            if str(col).lower() == str(candidate).lower():
+                preferred = col
                 break
-
-    if amount_col:
-        df[amount_col] = df[amount_col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
-        df["Amount"] = pd.to_numeric(df[amount_col], errors='coerce')
-    else:
-        df["Amount"] = pd.NA
-
-    # find date column candidates
-    date_col = None
-    for candidate in ["DateTime", "Datetime", "Timestamp", "Date", "date", "timestamp"]:
-        if candidate in df.columns:
-            date_col = candidate
+        if preferred:
             break
+    if not preferred and amount_columns:
+        preferred = amount_columns[0]
 
-    if date_col:
-        try:
-            df["DateTime"] = pd.to_datetime(df[date_col], errors='coerce')
-        except Exception:
-            df["DateTime"] = pd.to_datetime(df[date_col].astype(str), errors='coerce')
-    else:
-        parsed_dt = None
-        for c in df.columns:
-            if df[c].dtype == object:
-                try:
-                    tmp = pd.to_datetime(df[c], errors='coerce')
-                    if tmp.notna().sum() >= 3:
-                        parsed_dt = tmp
-                        break
-                except Exception:
-                    continue
-        if parsed_dt is not None:
-            df["DateTime"] = parsed_dt
-        else:
-            df["DateTime"] = pd.NaT
+    if preferred and preferred != 'Amount':
+        # rename preserved original column to standardized 'Amount' (only if 'Amount' not present)
+        if 'Amount' not in df.columns:
+            df.rename(columns={preferred: 'Amount'}, inplace=True)
+            preferred = 'Amount'
 
-    # ensure Type column exists (debit/credit)
-    if "Type" not in df.columns:
-        def infer_type(x):
-            try:
-                if pd.isna(x):
-                    return ""
-                if float(x) < 0:
-                    return "debit"
-                return "credit"
-            except Exception:
-                return ""
-        df["Type"] = df["Amount"].apply(infer_type)
-    else:
-        df["Type"] = df["Type"].astype(str)
-
-    # Suspicious detection
-    try:
-        threshold = 1_000_000
-        df["Suspicious"] = df["Amount"].apply(lambda x: 1 if (pd.isna(x) or abs(x) >= threshold) else 0)
-    except Exception:
-        df["Suspicious"] = 0
-
-    # drop rows with no datetime and no amount
-    df = df.loc[~(df["DateTime"].isna() & df["Amount"].isna())].reset_index(drop=True)
-
-    df["Type"] = df["Type"].str.lower()
-
+    # Final: return df with converted types
     return df
 
 # ---------------- Main execution ----------------
@@ -241,155 +208,28 @@ if df_raw.empty:
     st.warning("⚠️ No data returned. Check the sheet name/range and ensure the service account has viewer access.")
     st.stop()
 
-# ---------- Clean the raw DataFrame ----------
-@st.cache_data(ttl=300)
-def _clean_cached(df_raw_in):
-    return clean_history_transactions(df_raw_in)
+st.success(f"✅ Loaded data — {len(df_raw):,} rows, {df_raw.shape[1]} columns.")
 
-try:
-    with st.spinner("Cleaning data..."):
-        cleaned_df = _clean_cached(df_raw)
-except Exception as e:
-    st.error(f"Cleaning failed: {e}")
-    st.stop()
+# Convert column types and round amount-like columns
+converted_df = convert_column_types(df_raw, round_decimals=2)
 
-# ---------- Show basic counts & KPIs ----------
-rows_read = len(df_raw)
-st.success(f"✅ Successfully loaded data from Google Sheet — {rows_read:,} rows read.")
+# Show top 10 rows and data types
+st.subheader("Top 10 rows (after type conversion)")
+st.write(converted_df.head(10))
 
-def safe_sum_by_type(df_in, match_str):
-    try:
-        return df_in.loc[df_in["Type"].str.lower().str.contains(match_str, na=False), "Amount"].sum()
-    except Exception:
-        return 0.0
+st.subheader("Column data types")
+# present dtypes in a neat table
+dt_df = pd.DataFrame({
+    "column": converted_df.columns.astype(str),
+    "dtype": [str(converted_df[c].dtype) for c in converted_df.columns]
+})
+st.write(dt_df)
 
-total_debit = safe_sum_by_type(cleaned_df, "debit")
-total_credit = safe_sum_by_type(cleaned_df, "credit")
+# If an 'Amount' column exists, show a small summary (and round-up was already applied)
+if 'Amount' in converted_df.columns:
+    st.subheader("Amount summary")
+    st.write(converted_df['Amount'].describe().apply(lambda x: float(x) if pd.notna(x) else x))
 
-try:
-    suspicious_count = int(cleaned_df["Suspicious"].sum())
-except Exception:
-    suspicious_count = 0
-
-col1, col2, col3 = st.columns([1,1,1])
-col1.metric("Total Debit", f"{total_debit:,.2f}")
-col2.metric("Total Credit", f"{total_credit:,.2f}")
-col3.metric("Suspicious", f"{suspicious_count:,}")
-
-# show small secondary info
-colA, colB = st.columns([1,3])
-colA.write(f"Rows read: {rows_read:,}")
-colB.write(f"Columns: {', '.join(cleaned_df.columns.astype(str))}")
-
-# Download cleaned CSV
-clean_csv = cleaned_df.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download Cleaned CSV", data=clean_csv, file_name="history_transactions_cleaned.csv", mime="text/csv")
-
-# ---------------- Daily aggregation & improved diagnostics & fallback ----------------
-st.subheader("Debugging & aggregation (auto-diagnostics)")
-
-# 1) Ensure Amount numeric (cleaner might have done this)
-if 'Amount' in cleaned_df.columns:
-    cleaned_df['Amount'] = pd.to_numeric(cleaned_df['Amount'].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
-else:
-    cleaned_df['Amount'] = pd.NA
-
-st.write("Amount summary:")
-try:
-    st.write(cleaned_df['Amount'].describe())
-except Exception:
-    st.write("No Amount column or not numeric")
-
-# 2) Ensure DateTime exists — try common alternate column names if missing
-date_candidates = ['DateTime', 'Datetime', 'Timestamp', 'Date', 'Txn Date', 'TxnDate', 'timestamp', 'date']
-if 'DateTime' in cleaned_df.columns:
-    cleaned_df['DateTime'] = pd.to_datetime(cleaned_df['DateTime'], errors='coerce')
-else:
-    for cand in date_candidates:
-        if cand in cleaned_df.columns:
-            cleaned_df['DateTime'] = pd.to_datetime(cleaned_df[cand], errors='coerce', dayfirst=False)
-            st.write(f"Parsed DateTime from column `{cand}`")
-            break
-# show how many parsed
-if 'DateTime' in cleaned_df.columns:
-    st.write("DateTime non-null count:", int(cleaned_df['DateTime'].notna().sum()), "null count:", int(cleaned_df['DateTime'].isna().sum()))
-else:
-    st.write("No DateTime column found after attempts.")
-
-# 3) Normalize and map Type values (common bank notations)
-if 'Type' in cleaned_df.columns:
-    cleaned_df['Type'] = cleaned_df['Type'].astype(str).str.strip().str.lower()
-    mapping = {
-        'dr':'debit','d':'debit','debit':'debit','withdrawal':'debit','debited':'debit',
-        'cr':'credit','c':'credit','credit':'credit','deposit':'credit','credited':'credit'
-    }
-    cleaned_df['Type'] = cleaned_df['Type'].map(lambda x: mapping.get(x, x))
-else:
-    cleaned_df['Type'] = ''
-
-st.write("Type value counts (top):")
-try:
-    st.write(cleaned_df['Type'].value_counts(dropna=False).head(20))
-except Exception:
-    st.write("No Type counts available")
-
-# 4) If Type is missing or mostly empty, infer from Amount sign
-if cleaned_df['Type'].astype(str).str.strip().eq('').sum() >= len(cleaned_df) * 0.5:
-    st.write("Inferring Type from Amount sign (many missing/unknown Type values).")
-    cleaned_df['Type'] = cleaned_df['Amount'].apply(lambda v: 'debit' if pd.notna(v) and v < 0 else ('credit' if pd.notna(v) and v > 0 else ''))
-
-# 5) Build df_debit and df_credit
-df_debit = cleaned_df[cleaned_df['Type'].astype(str).str.lower() == 'debit'].copy()
-df_credit = cleaned_df[cleaned_df['Type'].astype(str).str.lower() == 'credit'].copy()
-st.write("Rows found — debit:", df_debit.shape[0], "credit:", df_credit.shape[0])
-
-# 6) Group into daily sums using the filtered frames (defensive)
-def compute_daily(df_frame, amount_col='Amount', dt_col='DateTime', out_col='Total'):
-    if df_frame.empty or dt_col not in df_frame.columns:
-        return pd.DataFrame(columns=['Date', out_col])
-    try:
-        daily = df_frame.groupby(df_frame[dt_col].dt.date)[amount_col].sum().reset_index()
-        daily.columns = ['Date', out_col]
-        return daily
-    except Exception:
-        return pd.DataFrame(columns=['Date', out_col])
-
-daily_spend = compute_daily(df_debit, amount_col='Amount', dt_col='DateTime', out_col='Total_Spent')
-daily_credit = compute_daily(df_credit, amount_col='Amount', dt_col='DateTime', out_col='Total_Credit')
-
-st.write("Daily spend sample:", daily_spend.head())
-st.write("Daily credit sample:", daily_credit.head())
-
-# 7) Merge; if empty, fallback to overall daily sum (ignore Type)
-merged = pd.DataFrame()
-if not daily_spend.empty or not daily_credit.empty:
-    merged = pd.merge(daily_spend, daily_credit, on='Date', how='outer').fillna(0)
-    try:
-        merged['Date'] = pd.to_datetime(merged['Date'])
-    except Exception:
-        pass
-    merged = merged.sort_values('Date').reset_index(drop=True)
-
-# fallback: if merged is empty or has no rows with nonzero totals, compute overall daily totals (ignoring Type)
-need_fallback = merged.empty or (merged[['Total_Spent','Total_Credit']].sum(axis=1).abs().sum() == 0)
-if need_fallback:
-    st.write("Merged is empty or zero — computing overall daily totals (ignoring Type) as a fallback.")
-    try:
-        overall = cleaned_df.dropna(subset=['DateTime']).groupby(cleaned_df['DateTime'].dt.date)['Amount'].sum().reset_index()
-        overall.columns = ['Date', 'Total_Spent']
-        overall['Total_Credit'] = 0.0
-        overall['Date'] = pd.to_datetime(overall['Date'])
-        overall = overall.sort_values('Date').reset_index(drop=True)
-        merged = overall
-        st.write("Overall daily totals (fallback) sample:", merged.head())
-    except Exception as e:
-        st.write("Could not compute overall fallback daily totals:", e)
-        merged = pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit'])
-
-# final diagnostics
-st.write("Merged (top 15):")
-st.write(merged.head(15))
-st.write("Merged shape:", merged.shape)
-if not merged.empty:
-    st.write("Merged describe:", merged[['Total_Spent','Total_Credit']].describe().applymap(lambda x: float(x) if not pd.isna(x) else x))
-    st.write("Total_Spent diffs (first 10):", merged['Total_Spent'].diff().fillna(merged['Total_Spent']).head(10))
+# Download cleaned CSV (converted types). Numeric/date columns will be represented in CSV accordingly.
+csv_bytes = converted_df.to_csv(index=False).encode('utf-8')
+st.download_button("⬇️ Download Converted CSV", data=csv_bytes, file_name="sheet_converted.csv", mime="text/csv")
