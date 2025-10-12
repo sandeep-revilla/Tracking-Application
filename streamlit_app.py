@@ -349,8 +349,32 @@ merged = merged.sort_values('Date').reset_index(drop=True)
 # ensure numeric native dtypes (float64) to avoid weird formatting issues
 merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
 merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
+st.write("MERGED sample (top 10):")
+st.write(merged.head(10))
 
-# build long-form DataFrame for Altair
+st.write("Date stats:")
+try:
+    st.write("min:", merged['Date'].min(), "max:", merged['Date'].max(), "nunique:", merged['Date'].nunique())
+except Exception as e:
+    st.write("Could not compute Date stats:", e)
+
+st.write("Merged dtypes:")
+st.write(merged.dtypes)
+
+# --- Robust Altair plotting block: handles single-day & small domains ---
+# normalize & sort dates
+merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
+merged = merged.sort_values('Date').reset_index(drop=True)
+
+# ensure numeric native dtypes
+merged['Total_Spent'] = pd.to_numeric(merged.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
+merged['Total_Credit'] = pd.to_numeric(merged.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
+
+# small debug (optional) - uncomment to inspect at runtime
+# st.write("MERGED head:", merged.head(10))
+# st.write("Date min/max/nunique:", merged['Date'].min(), merged['Date'].max(), merged['Date'].nunique())
+
+# prepare long-form DF
 plot_df = merged.copy()
 if plot_df.empty:
     st.info("No daily totals available to plot.")
@@ -358,7 +382,7 @@ else:
     plot_df_long = plot_df.melt(id_vars='Date', value_vars=['Total_Spent', 'Total_Credit'],
                                 var_name='Type', value_name='Amount').sort_values('Date')
 
-    # apply checkbox filters (this is rerun on user change)
+    # apply checkbox filters
     selected = []
     if show_debit: selected.append('Total_Spent')
     if show_credit: selected.append('Total_Credit')
@@ -370,51 +394,58 @@ else:
         plot_df_long['Amount'] = pd.to_numeric(plot_df_long['Amount'], errors='coerce').fillna(0.0).astype('float64')
         plot_df_long['Date'] = pd.to_datetime(plot_df_long['Date'])
 
-        # set a clean x domain (min,max) to keep axis ticks consistent
+        # compute x domain safely (expand if single date)
         x_min = plot_df['Date'].min()
         x_max = plot_df['Date'].max()
+        if pd.isna(x_min) or pd.isna(x_max):
+            # fallback - let Altair handle domain
+            x_domain = None
+        else:
+            if x_min == x_max:
+                # expand by ±1 day so axis has span
+                x_min = x_min - pd.Timedelta(days=1)
+                x_max = x_max + pd.Timedelta(days=1)
+            else:
+                # optionally expand a little for nicer padding (1 day)
+                x_min = x_min - pd.Timedelta(days=0)
+                x_max = x_max + pd.Timedelta(days=0)
+            x_domain = [x_min, x_max]
 
-        # selection bound to legend — used to change opacity (highlight) but not to filter out rows
+        # legend selection highlights (doesn't filter rows)
         legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
 
         x_axis = alt.X(
             'Date:T',
             title='Date',
             axis=alt.Axis(format='%b %d', tickCount=8, labelAngle=-45),
-            scale=alt.Scale(domain=[x_min, x_max])
+            **({'scale': alt.Scale(domain=x_domain)} if x_domain is not None else {})
         )
 
         y_axis = alt.Y(
             'Amount:Q',
             title='Amount',
-            axis=alt.Axis(format=",.0f")  # thousand separators, integer format
+            axis=alt.Axis(format=",.0f")
         )
 
         color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#1f77b4', '#ff7f0e'])
 
-        chart = (
-            alt.Chart(plot_df_long)
-            .mark_line(point=True)
-            .encode(
-                x=x_axis,
-                y=y_axis,
-                color=alt.Color('Type:N', title='Type', scale=color_scale),
-                tooltip=[
-                    alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
-                    alt.Tooltip('Type:N', title='Type'),
-                    alt.Tooltip('Amount:Q', title='Amount', format=',')
-                ],
-                # change opacity to highlight the selected legend item; if none selected, show all at 1.0
-                opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
-            )
-            .add_selection(legend_sel)
-            .properties(title="Daily Spend and Credit — Altair", height=450)
-            .interactive()
-        )
+        # line + points (points make single-day visible)
+        base = alt.Chart(plot_df_long).encode(
+            x=x_axis,
+            y=y_axis,
+            color=alt.Color('Type:N', title='Type', scale=color_scale),
+            tooltip=[
+                alt.Tooltip('Date:T', title='Date', format='%Y-%m-%d'),
+                alt.Tooltip('Type:N', title='Type'),
+                alt.Tooltip('Amount:Q', title='Amount', format=',')
+            ],
+            opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.25))
+        ).add_selection(legend_sel)
+
+        line = base.mark_line(point=False).encode()
+        points = base.mark_point(filled=True, size=40).encode()
+
+        chart = (line + points).properties(title="Daily Spend and Credit — Altair", height=450).interactive()
 
         st.altair_chart(chart, use_container_width=True)
-# --- END: REPLACEMENT Altair plotting block ---
-st.write("MERGED HEAD:", merged.head(15))
-st.write("MERGED DTYPE:", merged.dtypes)
 
-# end of file
