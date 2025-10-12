@@ -1,10 +1,13 @@
 # streamlit_app.py
 """
-Single-file Streamlit app (no charts) — Amounts as integers:
+Single-file Streamlit app (no charts) — Amounts as integers; add date & timestamp:
 - Connects to Google Sheets via service account (st.secrets or file)
 - Converts sheet values to a pandas DataFrame
 - Auto-converts columns to inferred types (dates / numeric)
 - Converts amount-like column(s) to integer (rounded) using pandas nullable Int64
+- Adds two derived columns:
+    - `date`      : only the date part (python date objects)
+    - `timestamp` : full datetime (pandas datetime64[ns])
 - Shows top 10 rows and column data types
 - Offers cleaned CSV download
 """
@@ -19,8 +22,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Google Sheet Connector — Amounts as Integer", layout="wide")
-st.title("🔐 Google Sheet Connector — Convert Types (Amounts → Integer)")
+st.set_page_config(page_title="Google Sheet Connector — Amounts Int + Date/Timestamp", layout="wide")
+st.title("🔐 Google Sheet Connector — Amounts → Integer, add date & timestamp")
 
 # ---------------- Sidebar Inputs ----------------
 SHEET_ID = st.sidebar.text_input(
@@ -123,13 +126,14 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
         raise RuntimeError(f"Google Sheets API error: {e}")
     return values_to_dataframe(values)
 
-# ---------------- Column type conversion utility (Amounts -> integer) ----------------
-def convert_column_types_to_integer(df: pd.DataFrame) -> pd.DataFrame:
+# ---------------- Column type conversion utility (Amounts -> Int64; add date/timestamp) ----------------
+def convert_column_types_to_integer_with_date(df: pd.DataFrame) -> pd.DataFrame:
     """
     Heuristically convert columns:
       - parse columns with names containing date/time keywords to datetime
       - coerce amount-like columns to integer (rounded) using pandas 'Int64' dtype
       - attempt to convert other numeric-looking columns (rounded to integer)
+      - create 'timestamp' (datetime64[ns]) and 'date' (python date objects) columns derived from best datetime column found
     Returns a new DataFrame with converted columns.
     """
     if df is None or df.empty:
@@ -154,11 +158,8 @@ def convert_column_types_to_integer(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
         lname = str(col).lower()
         if any(k in lname for k in num_keywords):
-            # strip non-digit characters and coerce to float, then round and cast to Int64
             coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
-            # round to nearest integer
             coerced = coerced.round(0)
-            # convert to pandas nullable integer (Int64) preserving NaNs
             coerced_int = coerced.astype('Int64')
             df[col] = coerced_int
             amount_columns.append(col)
@@ -175,7 +176,6 @@ def convert_column_types_to_integer(df: pd.DataFrame) -> pd.DataFrame:
 
     # 4) Standardize preferred amount column name => 'Amount' (if possible)
     preferred = None
-    # preferred candidates in order
     candidates = ['Amount', 'amount', 'total_spent', 'totalspent', 'total', 'txn amount', 'value', 'spent']
     for candidate in candidates:
         for col in df.columns:
@@ -188,15 +188,57 @@ def convert_column_types_to_integer(df: pd.DataFrame) -> pd.DataFrame:
         preferred = amount_columns[0]
 
     if preferred and preferred != 'Amount':
-        # rename to 'Amount' if that name is not already present
         if 'Amount' not in df.columns:
             df.rename(columns={preferred: 'Amount'}, inplace=True)
             preferred = 'Amount'
 
-    # If we have an Amount column, ensure it's Int64 (if not already)
-    if 'Amount' in df.columns and not pd.api.types.is_integer_dtype(df['Amount']):
-        # try to coerce safely to Int64
+    # ensure Amount is Int64 if present
+    if 'Amount' in df.columns:
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').round(0).astype('Int64')
+
+    # ---------------- derive timestamp & date ----------------
+    # Find best datetime column (prioritize existing datetime dtypes, then date-like names, then Unnamed: 0)
+    primary_dt_col = None
+    # 1) any column already datetime dtype with non-null values
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]) and df[col].notna().sum() > 0:
+            primary_dt_col = col
+            break
+    # 2) look for common date-like column names
+    if primary_dt_col is None:
+        for col in df.columns:
+            lname = str(col).lower()
+            if any(k in lname for k in date_keywords) or str(col).lower().startswith("unnamed"):
+                # try parse and check
+                parsed = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
+                if parsed.notna().sum() > 0:
+                    df[col] = parsed
+                    primary_dt_col = col
+                    break
+    # 3) try to parse any object column with many parseable dates
+    if primary_dt_col is None:
+        for col in df.columns:
+            if pd.api.types.is_object_dtype(df[col]):
+                parsed = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
+                if parsed.notna().sum() >= 3:
+                    df[col] = parsed
+                    primary_dt_col = col
+                    break
+
+    # Create 'timestamp' and 'date' columns based on primary_dt_col
+    if primary_dt_col:
+        # timestamp: full datetime (datetime64[ns])
+        df['timestamp'] = pd.to_datetime(df[primary_dt_col], errors='coerce')
+        # date: only date portion (python date objects). Use .dt.date so it's obvious "only date".
+        try:
+            df['date'] = df['timestamp'].dt.date
+        except Exception:
+            # fallback to NaNs if something weird
+            df['date'] = pd.NA
+    else:
+        # if no datetime found, create empty columns
+        df['timestamp'] = pd.NaT
+        df['date'] = pd.NA
 
     return df
 
@@ -221,8 +263,8 @@ if df_raw.empty:
 
 st.success(f"✅ Loaded data — {len(df_raw):,} rows, {df_raw.shape[1]} columns.")
 
-# Convert column types and coerce amount-like columns to integer (nullable Int64)
-converted_df = convert_column_types_to_integer(df_raw)
+# Convert column types (amounts -> Int64) and add date/timestamp columns
+converted_df = convert_column_types_to_integer_with_date(df_raw)
 
 # Show top 10 rows and data types
 st.subheader("Top 10 rows (after type conversion)")
@@ -239,7 +281,6 @@ st.write(dt_df)
 if 'Amount' in converted_df.columns:
     st.subheader("Amount summary (Integer, nullable)")
     amt = converted_df['Amount']
-    # show count of non-null, min/max, mean (mean may be float)
     st.write({
         "non_null_count": int(amt.notna().sum()),
         "min": int(amt.min()) if amt.notna().any() else None,
@@ -247,6 +288,14 @@ if 'Amount' in converted_df.columns:
         "mean": float(amt.dropna().astype(float).mean()) if amt.notna().any() else None
     })
 
-# Download cleaned CSV (converted types). Note: pandas will write Int64 as numbers or empty for NA.
+# Show quick info about the derived date/timestamp
+st.subheader("Derived date/timestamp info")
+if 'timestamp' in converted_df.columns:
+    st.write("timestamp non-null count:", int(converted_df['timestamp'].notna().sum()))
+if 'date' in converted_df.columns:
+    st.write("date non-null count:", int(converted_df['date'].notna().sum()))
+    st.write("date sample:", converted_df['date'].dropna().head(5).tolist())
+
+# Download cleaned CSV
 csv_bytes = converted_df.to_csv(index=False).encode('utf-8')
-st.download_button("⬇️ Download Converted CSV (Amounts as integer)", data=csv_bytes, file_name="sheet_converted_integer_amounts.csv", mime="text/csv")
+st.download_button("⬇️ Download Converted CSV (Amounts as integer)", data=csv_bytes, file_name="sheet_converted_integer_amounts_with_date.csv", mime="text/csv")
