@@ -335,3 +335,143 @@ if 'date' in converted_df.columns:
 # Download cleaned CSV
 csv_bytes = converted_df.to_csv(index=False).encode('utf-8')
 st.download_button("⬇️ Download Converted CSV (Amounts as integer)", data=csv_bytes, file_name="sheet_converted_integer_amounts_with_single_date_timestamp.csv", mime="text/csv")
+
+# --- Daily totals computation + Plotly and Matplotlib plotters ---
+
+import plotly.express as px
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
+
+def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return merged daily totals DataFrame with columns:
+      - Date (datetime64[ns])
+      - Total_Spent (sum of Amount for Type == 'debit' or overall if no Type)
+      - Total_Credit (sum of Amount for Type == 'credit', 0 if none)
+    Expects `df` to contain:
+      - 'Amount' (numeric / Int64)
+      - either 'date' (python.date) or 'timestamp' (datetime)
+      - optional 'Type' column with 'debit' / 'credit'
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit'])
+
+    # use the 'date' column if present, else derive from 'timestamp'
+    if 'date' in df.columns and df['date'].notna().any():
+        date_series = pd.to_datetime(df['date'])
+    elif 'timestamp' in df.columns and df['timestamp'].notna().any():
+        date_series = pd.to_datetime(df['timestamp']).dt.date
+        date_series = pd.to_datetime(date_series)
+    else:
+        # try any datetime-like
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]) and df[col].notna().any():
+                date_series = pd.to_datetime(df[col]).dt.date
+                date_series = pd.to_datetime(date_series)
+                break
+        else:
+            # no date available
+            return pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit'])
+
+    working = df.copy()
+    working['_plot_date'] = date_series.dt.date  # group by pure date (no time)
+
+    # Ensure Amount numeric (coerce missing to 0 for aggregation)
+    if 'Amount' not in working.columns:
+        working['Amount'] = 0
+    working['Amount_numeric'] = pd.to_numeric(working['Amount'], errors='coerce').fillna(0.0)
+
+    # If Type exists, separate debit/credit; otherwise use overall as Total_Spent
+    if 'Type' in working.columns and working['Type'].astype(str).str.strip().any():
+        debit = working[working['Type'].astype(str).str.lower() == 'debit']
+        credit = working[working['Type'].astype(str).str.lower() == 'credit']
+        daily_spend = (debit.groupby(debit['_plot_date'])['Amount_numeric'].sum().reset_index().rename(columns={'_plot_date':'Date','Amount_numeric':'Total_Spent'}))
+        daily_credit = (credit.groupby(credit['_plot_date'])['Amount_numeric'].sum().reset_index().rename(columns={'_plot_date':'Date','Amount_numeric':'Total_Credit'}))
+    else:
+        overall = (working.groupby(working['_plot_date'])['Amount_numeric'].sum().reset_index().rename(columns={'_plot_date':'Date','Amount_numeric':'Total_Spent'}))
+        daily_spend = overall
+        daily_credit = pd.DataFrame(columns=['Date','Total_Credit'])
+
+    # Merge debit + credit
+    merged = pd.merge(daily_spend, daily_credit, on='Date', how='outer').fillna(0)
+    merged['Date'] = pd.to_datetime(merged['Date'])
+    merged = merged.sort_values('Date').reset_index(drop=True)
+    return merged
+
+def plotly_daily_spend(merged_df: pd.DataFrame, title: str = "Daily Spend and Credit (Plotly)"):
+    """Interactive Plotly line chart for merged daily totals."""
+    if merged_df is None or merged_df.empty:
+        st.info("No daily data to plot (Plotly).")
+        return
+
+    # Choose which columns to plot
+    y_cols = []
+    if 'Total_Spent' in merged_df.columns:
+        y_cols.append('Total_Spent')
+    if 'Total_Credit' in merged_df.columns and merged_df['Total_Credit'].sum() != 0:
+        y_cols.append('Total_Credit')
+
+    if not y_cols:
+        st.info("No Total_Spent/Total_Credit columns found for Plotly.")
+        return
+
+    # Melt for a clean legend/hover
+    plot_df = merged_df[['Date'] + y_cols].melt(id_vars='Date', var_name='Type', value_name='Amount')
+
+    fig = px.line(plot_df, x='Date', y='Amount', color='Type', markers=True, title=title)
+    fig.update_layout(template='plotly_white', xaxis_title='Date', yaxis_title='Amount',
+                      legend_title='Type', hovermode='x unified')
+    fig.update_traces(hovertemplate='%{x|%Y-%m-%d}: %{y:.0f}')
+    st.plotly_chart(fig, use_container_width=True)
+
+def matplotlib_daily_spend(merged_df: pd.DataFrame, title: str = "Daily Spend and Credit (Matplotlib)"):
+    """Matplotlib static chart for merged daily totals (suitable for st.pyplot)."""
+    if merged_df is None or merged_df.empty:
+        st.info("No daily data to plot (Matplotlib).")
+        return
+
+    # Prepare x and y
+    x = pd.to_datetime(merged_df['Date'])
+    fig, ax = plt.subplots(figsize=(10, 4), dpi=100)
+
+    if 'Total_Spent' in merged_df.columns:
+        ax.plot(x, merged_df['Total_Spent'], marker='o', linestyle='-', linewidth=2, label='Total_Spent')
+    if 'Total_Credit' in merged_df.columns and merged_df['Total_Credit'].sum() != 0:
+        ax.plot(x, merged_df['Total_Credit'], marker='o', linestyle='--', linewidth=2, label='Total_Credit')
+
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Amount')
+    ax.grid(axis='y', alpha=0.3)
+
+    # Format x-axis dates nicely
+    locator = mdates.AutoDateLocator()
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+
+    # Y-axis integer formatting
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda val, pos: f"{int(val):,}"))
+
+    ax.legend(loc='upper left')
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+# --- Usage example (paste after converted_df exists) ---
+if 'converted_df' in globals():
+    merged = compute_daily_totals(converted_df)
+    st.subheader("Daily totals (top rows)")
+    st.write(merged.head(10))
+
+    # show both charts side-by-side
+    c1, c2 = st.columns(2)
+    with c1:
+        plotly_daily_spend(merged, title="Daily Spend and Credit — Plotly")
+    with c2:
+        matplotlib_daily_spend(merged, title="Daily Spend and Credit — Matplotlib")
+else:
+    st.warning("converted_df not found in the current namespace. Run conversion step first.")
+
