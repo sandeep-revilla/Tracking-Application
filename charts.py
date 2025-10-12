@@ -2,12 +2,13 @@
 import plotly.express as px
 import streamlit as st
 
+
 def daily_spend_line_chart(df, debit_col='Total_Spent', credit_col=None):
     """
     Display a line chart of daily debit (and optionally credit) spending.
-    
+
     Args:
-        df (pd.DataFrame): Must contain columns ['Date', debit_col] 
+        df (pd.DataFrame): Must contain columns ['Date', debit_col]
                            and optionally credit_col.
         debit_col (str): Column name for debit/expenses.
         credit_col (str): Column name for credit/income.
@@ -28,6 +29,16 @@ def daily_spend_line_chart(df, debit_col='Total_Spent', credit_col=None):
     else:
         y_cols = [debit_col]
         title = "💸 Daily Spending Trend"
+
+    # Ensure Date is datetime-like or convertible for sensible plotting
+    try:
+        # If pandas present, conversion will succeed; if not, Plotly will try its best.
+        import pandas as _pd
+        if not _pd.api.types.is_datetime64_any_dtype(df['Date']):
+            df = df.copy()
+            df['Date'] = _pd.to_datetime(df['Date'])
+    except Exception:
+        pass
 
     fig = px.line(
         df,
