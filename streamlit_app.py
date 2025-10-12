@@ -130,15 +130,14 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
 # ---------------- Column type conversion utility (Amounts -> Int64; single date/timestamp) ----------------
 def convert_column_types_to_integer_with_single_date_and_timestamp(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Heuristically convert columns:
+    Convert columns:
       - parse columns with names containing date/time keywords to datetime
       - coerce amount-like columns to integer (rounded) using pandas 'Int64' dtype
-      - attempt to convert other numeric-looking columns (rounded to integer)
       - create exactly two standardized columns:
           - `timestamp` (datetime64[ns])
-          - `date` (python.date objects)
-        and remove any other existing columns named 'timestamp' or 'date' (case-insensitive)
-    Returns a new DataFrame with converted columns.
+          - `date`      (python.date objects)
+      - remove any other original columns that look like date/time (case-insensitive),
+        preserving only the canonical 'timestamp' and 'date' columns.
     """
     if df is None or df.empty:
         return df
@@ -148,27 +147,27 @@ def convert_column_types_to_integer_with_single_date_and_timestamp(df: pd.DataFr
     # Normalize column names (trim whitespace)
     df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
 
+    # keywords used to detect date/time-like columns
     date_keywords = ['date', 'time', 'timestamp', 'datetime', 'txn']
     num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit', 'spent']
 
-    # 1) Convert obvious date columns (including Unnamed: 0)
+    # 1) Parse obvious date-like columns (including Unnamed: 0)
     for col in list(df.columns):
         lname = str(col).lower()
         if any(k in lname for k in date_keywords) or str(col).lower().startswith("unnamed"):
             df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
 
-    # 2) Convert amount-like columns to numeric, round, and cast to nullable integer
+    # 2) Coerce amount-like columns to nullable Int64
     amount_columns = []
     for col in list(df.columns):
         lname = str(col).lower()
         if any(k in lname for k in num_keywords):
             coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
             coerced = coerced.round(0)
-            coerced_int = coerced.astype('Int64')
-            df[col] = coerced_int
+            df[col] = coerced.astype('Int64')
             amount_columns.append(col)
 
-    # 3) Try to coerce other object columns that look numeric (use sample heuristic)
+    # 3) Try coercing other object columns that look numeric (sample heuristic)
     for col in list(df.columns):
         if pd.api.types.is_object_dtype(df[col]):
             sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
@@ -178,7 +177,7 @@ def convert_column_types_to_integer_with_single_date_and_timestamp(df: pd.DataFr
                 coerced = coerced.round(0)
                 df[col] = coerced.astype('Int64')
 
-    # 4) Standardize preferred amount column name => 'Amount' (if possible)
+    # 4) Standardize preferred amount column name => 'Amount' if possible
     preferred = None
     candidates = ['Amount', 'amount', 'total_spent', 'totalspent', 'total', 'txn amount', 'value', 'spent']
     for candidate in candidates:
@@ -227,58 +226,46 @@ def convert_column_types_to_integer_with_single_date_and_timestamp(df: pd.DataFr
                     primary_dt_col = col
                     break
 
-    # ---------------- create canonical timestamp and date columns ----------------
-    # Create new canonical columns always named 'timestamp' and 'date'
+    # ---------------- create canonical timestamp & date ----------------
     if primary_dt_col:
         timestamp_series = pd.to_datetime(df[primary_dt_col], errors='coerce')
     else:
         timestamp_series = pd.Series([pd.NaT] * len(df), index=df.index, dtype='datetime64[ns]')
 
-    # Assign canonical timestamp column
+    # Create canonical columns
     df['timestamp'] = timestamp_series
-
-    # Assign canonical date column (python date objects) — use .dt.date, preserve NaNs as pd.NA
+    # date as python date objects; preserve missing values as pd.NA
     try:
-        # where timestamp is NaT, date will be pd.NaT -> convert to pd.NA
         date_series = timestamp_series.dt.date
-        # Convert NaT entries to pd.NA for consistent missingness
         date_series = date_series.where(pd.notna(timestamp_series), pd.NA)
         df['date'] = date_series
     except Exception:
-        # fallback: create empty date column
         df['date'] = pd.NA
 
-    # ---------------- remove other timestamp/date columns (case-insensitive), keep canonical ones ----------------
+    # ---------------- remove other original date/time-like columns ----------------
+    # Build a list of columns to drop: any column (original name) that looks date/time-like
+    # but skip the canonical 'timestamp' and 'date' we just created.
     cols_to_drop = []
     for col in list(df.columns):
         low = str(col).lower()
+        # skip canonical columns
         if low in ('timestamp', 'date'):
-            # if it's the canonical just created, keep it; others handled below
-            # we keep the ones literally named 'timestamp' and 'date' (these are canonical now)
             continue
-        # drop columns whose name matches timestamp/date (case-insensitive)
-        if low == 'timestamp' or low == 'date':
+        # if column name contains a date keyword, mark for drop
+        if any(k in low for k in date_keywords):
             cols_to_drop.append(col)
 
-    # Additionally, drop any original columns that have names equal to 'timestamp'/'date' in different cases
-    # (above check already avoids canonical; here we examine original names duplicates)
-    # Build set of original name lowercases except canonical
-    original_names_lower = [str(c).lower() for c in df.columns if c not in ('timestamp','date')]
-    # If there were original columns named 'timestamp' or 'date' (different case), they would appear in cols_to_drop already.
-
-    # execute drop if any (be conservative: only drop if not the canonical ones)
+    # Drop them (conservative: only drop if they exist)
     if cols_to_drop:
         df.drop(columns=cols_to_drop, inplace=True)
 
-    # Final safety: ensure there is exactly one 'timestamp' and one 'date' column
-    # If somehow duplicates remain with different cases, unify them by keeping the canonical ones and dropping others
+    # Ensure there is exactly one 'timestamp' and one 'date' column (drop case-variants if any)
     for col in list(df.columns):
         if col not in ('timestamp','date') and str(col).lower() in ('timestamp','date'):
             df.drop(columns=[col], inplace=True)
 
-    # Reorder to put timestamp & date early (optional)
+    # Reorder: put canonical timestamp & date first
     cols = list(df.columns)
-    # move timestamp and date to front if present
     final_cols = []
     if 'timestamp' in cols:
         final_cols.append('timestamp')
