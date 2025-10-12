@@ -5,7 +5,7 @@ Single-file Streamlit app:
 - Converts columns: amounts -> rounded nullable Int64; detects timestamp & date
 - Produces a single canonical `timestamp` (datetime64[ns]) and `date` (python.date)
 - Aggregates daily totals (Total_Spent / Total_Credit)
-- Interactive Altair chart with checkbox filters (and legend click available)
+- Interactive Altair chart with checkbox filters (legend-click highlights)
 - Diagnostics: top rows + merged.describe()
 """
 
@@ -118,13 +118,6 @@ def read_google_sheet(spreadsheet_id: str, range_name: str, creds_info: Optional
 
 # --------------- Column conversion utility ---------------
 def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    - Normalize column names (strip)
-    - Parse date-like columns
-    - Coerce amount-like columns to Int64 (rounded)
-    - Create canonical `timestamp` (datetime64[ns]) and `date` (python.date)
-    - Remove other date-like original columns (keep only canonical)
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -178,7 +171,6 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     if 'Amount' in df.columns:
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').round(0).astype('Int64')
     else:
-        # create column if missing
         df['Amount'] = pd.NA
 
     # Determine primary datetime column
@@ -210,7 +202,6 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
         df['timestamp'] = pd.to_datetime(df[primary_dt_col], errors='coerce')
     else:
         df['timestamp'] = pd.NaT
-    # date as python.date, keep missing as pd.NA
     try:
         date_series = df['timestamp'].dt.date
         date_series = date_series.where(pd.notna(df['timestamp']), pd.NA)
@@ -244,15 +235,10 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
 
 # --------------- Daily aggregation (dtype-safe) ---------------
 def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Returns DataFrame with Date (datetime64[ns]), Total_Spent (float64), Total_Credit (float64)
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=['Date','Total_Spent','Total_Credit'])
 
     w = df.copy()
-
-    # group by date (prefer 'date' column, else timestamp)
     if 'date' in w.columns and w['date'].notna().any():
         grp = pd.to_datetime(w['date']).dt.normalize()
     elif 'timestamp' in w.columns and w['timestamp'].notna().any():
@@ -267,8 +253,6 @@ def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
         else:
             return pd.DataFrame(columns=['Date','Total_Spent','Total_Credit'])
     w['_group_date'] = grp
-
-    # ensure Amount numeric as float64 for aggregation
     w['Amount_numeric'] = pd.to_numeric(w.get('Amount', 0), errors='coerce').fillna(0.0).astype('float64')
 
     # split by type if present
@@ -276,7 +260,6 @@ def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
         w['Type_norm'] = w['Type'].astype(str).str.lower().str.strip()
         debit_df = w[w['Type_norm'] == 'debit']
         credit_df = w[w['Type_norm'] == 'credit']
-
         daily_spend = debit_df.groupby(debit_df['_group_date'])['Amount_numeric'].sum().reset_index().rename(columns={'_group_date':'Date','Amount_numeric':'Total_Spent'})
         daily_credit = credit_df.groupby(credit_df['_group_date'])['Amount_numeric'].sum().reset_index().rename(columns={'_group_date':'Date','Amount_numeric':'Total_Credit'})
     else:
@@ -358,7 +341,7 @@ st.markdown("### Select series to display")
 show_debit = st.checkbox("Show debit (Total_Spent)", value=True)
 show_credit = st.checkbox("Show credit (Total_Credit)", value=True)
 
-# build long-form df for Altair (FIXED: show all by default; legend-click highlights)
+# --- START: REPLACEMENT Altair plotting block (fixed) ---
 # ensure merged Date/dtypes are normalized & sorted
 merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
 merged = merged.sort_values('Date').reset_index(drop=True)
@@ -428,6 +411,8 @@ else:
             .properties(title="Daily Spend and Credit — Altair", height=450)
             .interactive()
         )
-        
 
         st.altair_chart(chart, use_container_width=True)
+# --- END: REPLACEMENT Altair plotting block ---
+
+# end of file
