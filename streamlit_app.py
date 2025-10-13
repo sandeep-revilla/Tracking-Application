@@ -313,8 +313,3 @@ else:
 # ------------------ Footer / notes ----------------
 st.markdown("""
 ---
-**Notes:**  
-- `io_helpers.read_google_sheet` expects a plain dict (`creds_info`) or a file path (`creds_file`).  
-- We parse `st.secrets['gcp_service_account']` into a plain dict before calling the cached function to avoid Streamlit hashing errors.  
-- Bank detection is heuristic and looks for substrings (e.g., 'hdfc', 'indian bank') in description/message fields. You can extend `bank_map` in the code to improve detection.
-""")
