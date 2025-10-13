@@ -1,4 +1,4 @@
-# io_helpers.py -- data I/O helpers (pure functions, now with Streamlit caching)
+# io_helpers.py -- data I/O helpers (pure functions, no Streamlit runtime objects passed into cached functions)
 import json
 import os
 from typing import Any, Dict, List, Tuple, Optional
@@ -17,7 +17,7 @@ except Exception:
 
 
 def parse_service_account_secret(raw: Any) -> Dict:
-    """Parse a service account JSON blob stored as dict or string."""
+    """Parse a service account JSON blob stored as dict or string. Returns a plain dict."""
     if isinstance(raw, dict):
         return raw
     s = str(raw).strip()
@@ -94,23 +94,26 @@ def build_sheets_service_from_file(creds_file: str):
 
 @st.cache_data(ttl=600)
 def read_google_sheet(spreadsheet_id: str, range_name: str,
-                      creds_info: Optional[Dict] = None, creds_file: Optional[str] = None,
-                      secrets: Optional[Dict] = None) -> pd.DataFrame:
+                      creds_info: Optional[Dict] = None, creds_file: Optional[str] = None) -> pd.DataFrame:
     """
     Read a Google Sheet and return a pandas DataFrame.
-    - creds_info: parsed JSON dict for service account
-    - creds_file: path to service account JSON on disk
-    - secrets: optional dict (e.g., st.secrets) - used if creds_info / creds_file not provided
+    - creds_info: parsed JSON dict for service account (plain dict) OR None
+    - creds_file: path to service account JSON on disk OR None
 
-    This function is cached by Streamlit for 10 minutes by default (ttl=600).
+    IMPORTANT: Do NOT pass Streamlit runtime objects (e.g., st.secrets) to this function.
+    Pass a plain dict for creds_info (use parse_service_account_secret to convert).
+    This function is cached by Streamlit (ttl default 600 seconds).
     """
-    # prefer explicit creds_info / creds_file; else try secrets['gcp_service_account']
+    # prefer explicit creds_info / creds_file; else raise
     if creds_info is None and (creds_file is None or not os.path.exists(creds_file)):
-        if not secrets or 'gcp_service_account' not in secrets:
-            raise ValueError("No credentials found. Provide creds_info, creds_file, or secrets['gcp_service_account'].")
-        creds_info = parse_service_account_secret(secrets['gcp_service_account'])
+        raise ValueError("No credentials found. Provide creds_info (plain dict) or a valid creds_file path.")
 
-    service = (build_sheets_service_from_info(creds_info) if creds_info else build_sheets_service_from_file(creds_file))
+    service = None
+    if creds_info is not None:
+        service = build_sheets_service_from_info(creds_info)
+    else:
+        service = build_sheets_service_from_file(creds_file)
+
     try:
         sheet = service.spreadsheets()
         res = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
