@@ -310,6 +310,3 @@ else:
     csv_bytes = rows_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
-# ------------------ Footer / notes ----------------
-st.markdown("""
----
