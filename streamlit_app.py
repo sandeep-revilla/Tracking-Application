@@ -4,8 +4,8 @@ import pandas as pd
 import importlib
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Daily Spend (safe sheets)", layout="wide")
-st.title("💳 Daily Spending — safe Google Sheets handling")
+st.set_page_config(page_title="Daily Spend", layout="wide")
+st.title("💳 Daily Spending")
 
 # ------------------ Imports / placeholders ------------------
 # transform.py must exist and provide convert_columns_and_derives + compute_daily_totals
