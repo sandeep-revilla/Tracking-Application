@@ -404,6 +404,12 @@ function processNewRawRows(sheet) {
       continue;
     }
 
+    // If declined/failed transaction message -> ignore explicitly (case-insensitive)
+    if (at && at.is_declined) {
+      Logger.log('Ignoring declined/failed transaction message at raw row ' + (r+1) + ': ' + (msgStr||''));
+      continue;
+    }
+
     // Not a transaction (no amount) -> skip
     if (!at || at.amount === null) {
       continue;
@@ -458,7 +464,7 @@ function processNewRawRows(sheet) {
     existingHashes[rowHash] = true;
 
     // immediate email for debit >= EMAIL_THRESHOLD (and not ignored)
-    // include declined transactions in alerts as well
+    // include declined transactions in alerts as well (note: declined messages are already skipped earlier)
     if ((type === 'debit' || type === 'declined') && amount >= EMAIL_THRESHOLD && !ignoreReason) {
       try {
         var subject = (type === 'declined' ? 'Alert: Transaction Declined of Rs.' : 'Alert: Debit Transaction of Rs.') + amount.toFixed(2);
