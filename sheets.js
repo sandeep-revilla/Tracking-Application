@@ -77,12 +77,10 @@ function parseTimestampStr(s, tz) {
 function isOtpMessage(msg) {
   if (!msg) return false;
   var s = ('' + msg).toLowerCase();
-  // common OTP patterns: "OTP is 123456", "OTP: 123456", "Valid till", "Do not share OTP"
   if (/\botp\b/.test(s) && /\b\d{3,7}\b/.test(s)) return true;
   if (/\bvalid till\b/.test(s)) return true;
   if (/\bdo not share otp\b/.test(s)) return true;
   if (/\bone-?time[- ]?password\b/.test(s)) return true;
-  // also phrases with "OTP for txn" or "OTP for transaction"
   if (/\botp for (txn|transaction)\b/.test(s)) return true;
   return false;
 }
@@ -119,18 +117,15 @@ function isInformationalAlert(msg) {
     if (s.indexOf(phrases[i]) !== -1) return true;
   }
 
-  // typical combination: message mentions 'limit' and 'card' or 'transactions' or 'enabled'
   if (s.indexOf('limit') !== -1 && (s.indexOf('card') !== -1 || s.indexOf('transaction') !== -1 || s.indexOf('transactions') !== -1 || s.indexOf('enabled') !== -1 || s.indexOf('online') !== -1)) {
     return true;
   }
 
-  // Support messages that contain "not you? chat with us" / "for assistance" along with 'limit' or 'enabled'
   if ((s.indexOf('not you?') !== -1 || s.indexOf('not you') !== -1 || s.indexOf('chat with us') !== -1 || s.indexOf('for assistance') !== -1) &&
       (s.indexOf('limit') !== -1 || s.indexOf('enabled') !== -1 || s.indexOf('settings') !== -1)) {
     return true;
   }
 
-  // fallback: if message contains "limit" and looks like a notification rather than a debit/credit wording
   if (s.indexOf('limit') !== -1 && !(/\b(debited|withdrawn|paid|purchase|purchased|spent|credited|deposited)\b/.test(s))) {
     return true;
   }
@@ -139,22 +134,22 @@ function isInformationalAlert(msg) {
 }
 
 /* ---------------- Extract amount, type, subtype, category ----------------
-   Returns object: { amount: Number|null, type: 'debit'|'credit'|null, subtype: string|null, category: string|null, is_otp: boolean }
+   Returns object: { amount: Number|null, type: 'debit'|'credit'|'declined'|null, subtype: string|null, category: string|null, is_otp: boolean, is_informational: boolean, is_declined: boolean }
 */
 function extractAmountAndType(msg) {
-  if (!msg) return { amount: null, type: null, subtype: null, category: null, is_otp: false };
+  if (!msg) return { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: false, is_declined: false };
 
   // First detect OTP messages and return quickly
   if (isOtpMessage(msg)) {
-    return { amount: null, type: null, subtype: null, category: null, is_otp: true };
+    return { amount: null, type: null, subtype: null, category: null, is_otp: true, is_informational: false, is_declined: false };
   }
 
   // Also detect informational alerts and return quickly (mark as non-transaction)
   if (isInformationalAlert(msg)) {
-    return { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: true };
+    return { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: true, is_declined: false };
   }
 
-  var res = { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: false };
+  var res = { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: false, is_declined: false };
 
   // amount regex: Rs 1,234.56 or INR 1234.56 or ₹1234
   var mAmt = msg.match(/(?:rs\.?|inr|₹)\s*[:\-]?\s*([0-9,]+(?:\.\d+)?)/i);
@@ -168,6 +163,12 @@ function extractAmountAndType(msg) {
 
   var lower = (msg || '').toLowerCase();
 
+  // detect declined / failed auth messages (handle "TXN DECLINED", "transaction declined", "failed", "authorization failed")
+  if (/\b(txn declined|transaction declined|declined|authorization failed|authorisation failed|auth failed|txn failed|transaction failed)\b/i.test(msg)) {
+    res.is_declined = true;
+    if (!res.type) res.type = 'declined';
+  }
+
   // credit indicators
   if (/\b(credited|credit\b|deposited|cr[-\s]|neft|rtgs|refund|salary|payroll|payment received|benefit|credited in)\b/i.test(msg)) {
     res.type = 'credit';
@@ -175,7 +176,6 @@ function extractAmountAndType(msg) {
 
   // debit indicators
   if (/\b(debited|withdrawn|purchase|purchased|spent|paid|payment to|withdrawal|atm|bill payment|merchant|merchant payment|card)\b/i.test(msg)) {
-    // 'card' often indicates a card transaction (usually debit), treat as debit if ambiguous
     res.type = 'debit';
   }
 
@@ -218,8 +218,12 @@ function extractAmountAndType(msg) {
     if (/\bon\b|\bat\b|\bto\b/i.test(msg) && /\b(at|merchant|shop|store|amazon|flipkart|pay)\b/i.test(msg)) {
       res.type = 'debit';
     } else {
-      // leave unknown
-      res.type = null;
+      // remain unknown unless flagged as declined
+      if (res.is_declined) {
+        res.type = 'declined';
+      } else {
+        res.type = null;
+      }
     }
   }
 
@@ -429,6 +433,7 @@ function processNewRawRows(sheet) {
       continue;
     }
 
+    // Use type from extractor. If declined, extractor sets type to 'declined'
     var type = at.type || 'unknown';
     var amount = at.amount || 0;
     var subtype = at.subtype || '';
@@ -453,10 +458,11 @@ function processNewRawRows(sheet) {
     existingHashes[rowHash] = true;
 
     // immediate email for debit >= EMAIL_THRESHOLD (and not ignored)
-    if (type === 'debit' && amount >= EMAIL_THRESHOLD && !ignoreReason) {
+    // include declined transactions in alerts as well
+    if ((type === 'debit' || type === 'declined') && amount >= EMAIL_THRESHOLD && !ignoreReason) {
       try {
-        var subject = 'Alert: Debit Transaction of Rs.' + amount.toFixed(2);
-        var htmlBody = `<p>A debit transaction has been detected:</p>
+        var subject = (type === 'declined' ? 'Alert: Transaction Declined of Rs.' : 'Alert: Debit Transaction of Rs.') + amount.toFixed(2);
+        var htmlBody = `<p>A ${type === 'declined' ? 'declined' : 'debit'} transaction has been detected:</p>
           <table border="1" cellpadding="5" cellspacing="0">
             <tr><th>DateTime</th><th>Bank</th><th>Amount</th><th>Subtype</th><th>FromMask</th><th>ToMask</th><th>Message</th></tr>
             <tr>
@@ -469,7 +475,7 @@ function processNewRawRows(sheet) {
               <td>${escapeHtml(msgStr).replace(/\n/g,'<br>')}</td>
             </tr>
           </table>`;
-        MailApp.sendEmail({ to: recipient, subject: subject, htmlBody: htmlBody, body: 'Debit transaction: Rs.' + amount.toFixed(2) + ' on ' + dtFormatted });
+        MailApp.sendEmail({ to: recipient, subject: subject, htmlBody: htmlBody, body: (type === 'declined' ? 'Declined transaction: Rs.' : 'Debit transaction: Rs.') + amount.toFixed(2) + ' on ' + dtFormatted });
       } catch (e) {
         Logger.log('Immediate email failed for row ' + (r+1) + ': ' + e);
       }
@@ -569,6 +575,7 @@ function updateTodaySummary() {
 
         if (type === 'debit') { totalDebit += amount; countDebit++; }
         else if (type === 'credit') { totalCredit += amount; countCredit++; }
+        // treat declined as a separate type (not counted as debit)
         if (suspicious === 'yes') suspiciousCount++;
       }
     }
