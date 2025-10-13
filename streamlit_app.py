@@ -1,57 +1,47 @@
 # === FILE: app.py (main Streamlit app) ===
+"""
+Main Streamlit app that wires the sidebar UI, loads data (via io.py), transforms it (transform.py)
+and renders charts (charts.py). Keep this file minimal: it orchestrates the pieces.
+"""
 
 
-# Apply filters to merged
-plot_df = merged.copy()
-if sel_year != 'All':
-plot_df = plot_df[plot_df['Date'].dt.year == int(sel_year)]
-if sel_months:
-inv_map = {v:k for k,v in {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}.items()}
-selected_month_nums = [inv_map[m] for m in sel_months if m in inv_map]
-if selected_month_nums:
-plot_df = plot_df[plot_df['Date'].dt.month.isin(selected_month_nums)]
+import streamlit as st
+import pandas as pd
+from datetime import date
 
 
-plot_df = plot_df.sort_values('Date').reset_index(drop=True)
+# local module imports (make sure files are in the same directory)
+import io as io_mod
+import transform as tf
+import charts as charts_mod
 
 
-# Chart selector UI
-chart_type = st.sidebar.selectbox("Chart type", [
-"Daily line", "Stacked area", "Monthly bars", "Rolling average",
-"Cumulative sum", "Calendar heatmap", "Histogram of amounts", "Treemap by category"
-])
+st.set_page_config(page_title="Sheet → Daily Spend (modular)", layout="wide")
+st.title("💳 Daily Spending — Modular Version")
 
 
-# Series selection
-series_selected = []
-if show_debit: series_selected.append('Total_Spent')
-if show_credit: series_selected.append('Total_Credit')
+# Sidebar: data source
+with st.sidebar:
+st.header("Data source & filters")
+SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
+RANGE = st.text_input("Range or Sheet Name", value="History Transactions")
+CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
+st.markdown("---")
+st.subheader("Chart options")
+enable_plotly_click = st.checkbox("Enable click-to-select (Plotly)", value=False)
+st.markdown("---")
+st.write("Series to include")
+show_debit = st.checkbox("Debit (Total_Spent)", value=True)
+show_credit = st.checkbox("Credit (Total_Credit)", value=True)
+st.markdown("---")
+st.write("Data input: choose CSV upload (recommended for now) or Google Sheet")
+data_source = st.radio("Data source", ["Upload CSV/XLSX", "Google Sheet"], index=0)
 
 
-# Render chart
-charts_mod.render_chart(plot_df, converted_df, chart_type, series_selected, enable_plotly_click)
-
-
-# Show rows for selected date range (simple approach: show all filtered rows)
-st.subheader("Rows (matching selection)")
-rows_df = converted_df.copy()
-# apply year/month filters
-if sel_year != 'All':
-try:
-rows_df = rows_df[rows_df['timestamp'].dt.year == int(sel_year)]
-except Exception:
-pass
-if sel_months:
-inv_map = {v: k for k, v in {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1,13)}.items()}
-selected_month_nums = [inv_map[m] for m in sel_months if m in inv_map]
-if selected_month_nums:
-rows_df = rows_df[rows_df['timestamp'].dt.month.isin(selected_month_nums)]
-
-
-if rows_df.empty:
-st.write("No rows match the current filters/selection.")
-else:
-st.dataframe(rows_df.reset_index(drop=True))
+# Load data (either uploaded file or Google Sheet)
+uploaded = None
+if data_source == "Upload CSV/XLSX":
+uploaded = st.file_uploader("Upload CSV or XLSX (HDFC / Indian Bank)", type=["csv","xlsx"], help="File processed in-memory; not stored.")
 
 
 # End of modularized files
