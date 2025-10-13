@@ -1,4 +1,4 @@
-# io.py -- data I/O helpers (pure functions, no Streamlit)
+# io_helpers.py -- data I/O helpers (pure functions, no Streamlit)
 import json
 import os
 from typing import Any, Dict, List, Tuple, Optional
@@ -10,7 +10,6 @@ try:
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
 except Exception:
-    # If google libs aren't installed, functions that rely on them will raise when called.
     service_account = None
     build = None
     HttpError = Exception
