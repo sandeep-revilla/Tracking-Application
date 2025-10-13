@@ -229,7 +229,7 @@ else:
 with st.spinner("Computing daily totals..."):
     merged = transform.compute_daily_totals(converted_df_filtered)
 
-# ------------------ Sidebar: Date filters ------------------
+# ------------------ Sidebar: Date filters (moved above the table so table can obey selection) ----------------
 with st.sidebar:
     st.header("Filters")
     if not merged.empty:
@@ -246,22 +246,48 @@ with st.sidebar:
         month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1, 13)}
         month_choices = [month_map[m] for m in month_nums]
         sel_months = st.multiselect("Month(s)", options=month_choices, default=month_choices)
-
-        # date-range slider
-        try:
-            date_min = merged['Date'].min().date()
-            date_max = merged['Date'].max().date()
-            dr = st.slider("Select date range", min_value=date_min, max_value=date_max,
-                           value=(date_min, date_max), format="YYYY-MM-DD")
-            sel_date_range = (pd.to_datetime(dr[0]).date(), pd.to_datetime(dr[1]).date())
-        except Exception:
-            sel_date_range = (None, None)
     else:
         sel_year = 'All'
         sel_months = []
-        sel_date_range = (None, None)
 
-# ------------------ Apply filters to aggregated plot_df ------------------
+# Build safe min/max from available filtered rows (fallback to last 365 days)
+try:
+    tmp = converted_df_filtered.copy()
+    if 'timestamp' in tmp.columns:
+        tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], errors='coerce')
+    elif 'date' in tmp.columns:
+        tmp['timestamp'] = pd.to_datetime(tmp['date'], errors='coerce')
+    else:
+        tmp['timestamp'] = pd.NaT
+    valid_dates = tmp['timestamp'].dropna()
+    if not valid_dates.empty:
+        min_date = valid_dates.min().date()
+        max_date = valid_dates.max().date()
+    else:
+        max_date = datetime.utcnow().date()
+        min_date = max_date - timedelta(days=365)
+except Exception:
+    max_date = datetime.utcnow().date()
+    min_date = max_date - timedelta(days=365)
+
+with st.sidebar:
+    st.markdown("---")
+    st.write("Select a date (or range) for the totals & table below")
+    totals_mode = st.radio("Totals mode", ["Single date", "Date range"], index=0)
+    if totals_mode == "Single date":
+        selected_date = st.date_input("Pick date", value=datetime.utcnow().date(), min_value=min_date, max_value=max_date)
+        selected_date_range_for_totals = (selected_date, selected_date)
+    else:
+        # date_input with tuple returns (start, end)
+        default_range = (min_date, max_date)
+        dr = st.date_input("Pick start & end", value=default_range, min_value=min_date, max_value=max_date)
+        # dr might be a single date if user selects only one; ensure a tuple
+        if isinstance(dr, (tuple, list)):
+            selected_date_range_for_totals = (dr[0], dr[1])
+        else:
+            selected_date_range_for_totals = (dr, dr)
+
+# ------------------ Apply year/month filters to aggregated plot_df ------------------
 plot_df = merged.copy()
 if sel_year != 'All':
     plot_df = plot_df[plot_df['Date'].dt.year == int(sel_year)]
@@ -298,7 +324,9 @@ else:
 
 # ------------------ Rows view & download (show only selected columns) ----------------
 st.subheader("Rows (matching selection)")
-rows_df = converted_df_filtered.copy()  # use the filtered transactions so rows match chart
+
+# start from filtered transactions so rows match the chart & bank selection
+rows_df = converted_df_filtered.copy()
 
 # ensure timestamp exists (original logic)
 if 'timestamp' in rows_df.columns:
@@ -309,11 +337,17 @@ else:
     else:
         rows_df['timestamp'] = pd.NaT
 
-# apply date-range filter to rows (if available)
-if sel_date_range and sel_date_range[0] and sel_date_range[1]:
+# apply selected date-range filter to rows (inclusive)
+start_sel, end_sel = selected_date_range_for_totals
+if isinstance(start_sel, datetime):
+    start_sel = start_sel.date()
+if isinstance(end_sel, datetime):
+    end_sel = end_sel.date()
+
+if start_sel and end_sel:
     rows_df = rows_df[
-        (rows_df['timestamp'].dt.date >= sel_date_range[0]) &
-        (rows_df['timestamp'].dt.date <= sel_date_range[1])
+        (rows_df['timestamp'].dt.date >= start_sel) &
+        (rows_df['timestamp'].dt.date <= end_sel)
     ]
 
 # Desired columns (case-insensitive)
@@ -334,7 +368,7 @@ if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map
 # If we couldn't find any of the desired columns, show the full table as a fallback
 if not display_cols:
     st.warning("None of the preferred columns (timestamp, Bank, Type, Amount, Suspicious) were found — showing full table.")
-    st.dataframe(rows_df.reset_index(drop=True))
+    st.dataframe(rows_df.reset_index(drop=True), use_container_width=True, height=400)
     csv_bytes = rows_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 else:
@@ -374,74 +408,34 @@ else:
     final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Suspicious'] if c in display_df.columns]
     display_df = display_df[final_order]
 
-    # Show table and download only these columns
-    st.dataframe(display_df.reset_index(drop=True))
+    # Show table and download only these columns (use full width + fixed height to avoid excessive dragging)
+    st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=420)
     csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
-# ------------------ Date selector for totals (calendar) ------------------
-# Provide a simple calendar input in the sidebar to choose a single date or a date range for the totals.
-# We'll compute totals for the selected date or date-range (instead of always using "today").
-
-# Build safe min/max from available rows (fallback to last 365 days)
-try:
-    tmp = converted_df_filtered.copy()
-    if 'timestamp' in tmp.columns:
-        tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], errors='coerce')
-    elif 'date' in tmp.columns:
-        tmp['timestamp'] = pd.to_datetime(tmp['date'], errors='coerce')
-    else:
-        tmp['timestamp'] = pd.NaT
-    valid_dates = tmp['timestamp'].dropna()
-    if not valid_dates.empty:
-        min_date = valid_dates.min().date()
-        max_date = valid_dates.max().date()
-    else:
-        max_date = datetime.utcnow().date()
-        min_date = max_date - timedelta(days=365)
-except Exception:
-    max_date = datetime.utcnow().date()
-    min_date = max_date - timedelta(days=365)
-
-with st.sidebar:
-    st.markdown("---")
-    st.write("Select a date (or range) for the totals below")
-    totals_mode = st.radio("Totals mode", ["Single date", "Date range"], index=0)
-    if totals_mode == "Single date":
-        selected_date = st.date_input("Pick date", value=datetime.utcnow().date(), min_value=min_date, max_value=max_date)
-        selected_date_range_for_totals = (selected_date, selected_date)
-    else:
-        # date_input with tuple returns (start, end)
-        default_range = (min_date, max_date)
-        dr = st.date_input("Pick start & end", value=default_range, min_value=min_date, max_value=max_date)
-        # dr might be a single date if user selects only one; ensure a tuple
-        if isinstance(dr, tuple) or isinstance(dr, list):
-            selected_date_range_for_totals = (dr[0], dr[1])
-        else:
-            selected_date_range_for_totals = (dr, dr)
-
 # ------------------ Totals for selected date / range ------------------
-st.markdown("### Totals for selected date / range (filtered view)")
+# Build a human-friendly title (date + weekday for single day, or start → end for range)
+if start_sel == end_sel:
+    try:
+        title_date = start_sel.strftime("%Y-%m-%d (%A)")
+    except Exception:
+        title_date = str(start_sel)
+    totals_heading = f"Totals — {title_date}"
+else:
+    totals_heading = f"Totals — {start_sel} → {end_sel}"
+
+st.markdown(f"### {totals_heading}")
 
 try:
-    # Work on a copy of filtered rows_df that already had timestamp normalized
-    tmp_rows = rows_df.copy()
+    # Work on a copy of filtered rows that already had timestamp normalized
+    tmp_rows = converted_df_filtered.copy()
     if 'timestamp' in tmp_rows.columns:
         tmp_rows['timestamp'] = pd.to_datetime(tmp_rows['timestamp'], errors='coerce')
     else:
-        tmp_rows['timestamp'] = pd.NaT
-
-    start_sel, end_sel = selected_date_range_for_totals
-    if start_sel is None:
-        start_sel = min_date
-    if end_sel is None:
-        end_sel = max_date
-
-    # ensure date types
-    if isinstance(start_sel, datetime):
-        start_sel = start_sel.date()
-    if isinstance(end_sel, datetime):
-        end_sel = end_sel.date()
+        if 'date' in tmp_rows.columns:
+            tmp_rows['timestamp'] = pd.to_datetime(tmp_rows['date'], errors='coerce')
+        else:
+            tmp_rows['timestamp'] = pd.NaT
 
     # mask rows inside selection (inclusive)
     mask_sel = tmp_rows['timestamp'].dt.date.between(start_sel, end_sel)
