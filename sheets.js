@@ -70,17 +70,160 @@ function parseTimestampStr(s, tz) {
   return null;
 }
 
+/* ---------------- OTP Detection ----------------
+   Conservative heuristics to detect OTP / one-time-password / validation messages.
+   Returns true for messages that should be ignored as OTPs.
+*/
+function isOtpMessage(msg) {
+  if (!msg) return false;
+  var s = ('' + msg).toLowerCase();
+  // common OTP patterns: "OTP is 123456", "OTP: 123456", "Valid till", "Do not share OTP"
+  if (/\botp\b/.test(s) && /\b\d{3,7}\b/.test(s)) return true;
+  if (/\bvalid till\b/.test(s)) return true;
+  if (/\bdo not share otp\b/.test(s)) return true;
+  if (/\bone-?time[- ]?password\b/.test(s)) return true;
+  // also phrases with "OTP for txn" or "OTP for transaction"
+  if (/\botp for (txn|transaction)\b/.test(s)) return true;
+  return false;
+}
+
+/* ------------- Informational / Limit Alerts Detection -------------
+   Heuristics to detect non-transaction informational alerts such as
+   "New limit: Rs.10,000", "Enabled: Online domestic transactions limit" etc.
+   Return true if the message appears to be an informational limit/setting alert.
+*/
+function isInformationalAlert(msg) {
+  if (!msg) return false;
+  var s = ('' + msg).toLowerCase();
+
+  // obvious phrases for limit/setting alerts
+  var phrases = [
+    'new limit',
+    'limit set',
+    'limit changed',
+    'limit updated',
+    'limit enabled',
+    'limit has been',
+    'enabled: online',
+    'online domestic transactions limit',
+    'online transaction limit',
+    'card limit',
+    'daily limit',
+    'monthly limit',
+    'spending limit',
+    'limit:',
+    'limit -',
+    'limit –'
+  ];
+  for (var i = 0; i < phrases.length; i++) {
+    if (s.indexOf(phrases[i]) !== -1) return true;
+  }
+
+  // typical combination: message mentions 'limit' and 'card' or 'transactions' or 'enabled'
+  if (s.indexOf('limit') !== -1 && (s.indexOf('card') !== -1 || s.indexOf('transaction') !== -1 || s.indexOf('transactions') !== -1 || s.indexOf('enabled') !== -1 || s.indexOf('online') !== -1)) {
+    return true;
+  }
+
+  // Support messages that contain "not you? chat with us" / "for assistance" along with 'limit' or 'enabled'
+  if ((s.indexOf('not you?') !== -1 || s.indexOf('not you') !== -1 || s.indexOf('chat with us') !== -1 || s.indexOf('for assistance') !== -1) &&
+      (s.indexOf('limit') !== -1 || s.indexOf('enabled') !== -1 || s.indexOf('settings') !== -1)) {
+    return true;
+  }
+
+  // fallback: if message contains "limit" and looks like a notification rather than a debit/credit wording
+  if (s.indexOf('limit') !== -1 && !(/\b(debited|withdrawn|paid|purchase|purchased|spent|credited|deposited)\b/.test(s))) {
+    return true;
+  }
+
+  return false;
+}
+
+/* ---------------- Extract amount, type, subtype, category ----------------
+   Returns object: { amount: Number|null, type: 'debit'|'credit'|null, subtype: string|null, category: string|null, is_otp: boolean }
+*/
 function extractAmountAndType(msg) {
-  if (!msg) return { amount: null, type: null };
-  var mAmt = msg.match(/(?:Rs\.?|INR)\s*([0-9,]+(?:\.\d+)?)/i);
-  var amount = mAmt ? parseFloat(mAmt[1].replace(/,/g,'')) : null;
+  if (!msg) return { amount: null, type: null, subtype: null, category: null, is_otp: false };
+
+  // First detect OTP messages and return quickly
+  if (isOtpMessage(msg)) {
+    return { amount: null, type: null, subtype: null, category: null, is_otp: true };
+  }
+
+  // Also detect informational alerts and return quickly (mark as non-transaction)
+  if (isInformationalAlert(msg)) {
+    return { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: true };
+  }
+
+  var res = { amount: null, type: null, subtype: null, category: null, is_otp: false, is_informational: false };
+
+  // amount regex: Rs 1,234.56 or INR 1234.56 or ₹1234
+  var mAmt = msg.match(/(?:rs\.?|inr|₹)\s*[:\-]?\s*([0-9,]+(?:\.\d+)?)/i);
+  if (mAmt && mAmt[1]) {
+    try {
+      res.amount = parseFloat(mAmt[1].replace(/,/g,''));
+    } catch (e) {
+      res.amount = null;
+    }
+  }
+
   var lower = (msg || '').toLowerCase();
-  var type = null;
-  if (/\bcredited\b/i.test(lower) || /\bcredit\b/.test(lower)) type = 'credit';
-  else if (/\bsent\b/i.test(lower) && /\bfrom\b/i.test(lower)) type = 'debit';
-  else if (/\bdebited\b|\bwithdrawn\b|\bpaid\b|\bpurchase\b|\bpurchased\b|\btransfer(ed)?\b/i.test(lower)) type = 'debit';
-  if (/\bcredited\b/i.test(lower)) type = 'credit';
-  return { amount: amount, type: type };
+
+  // credit indicators
+  if (/\b(credited|credit\b|deposited|cr[-\s]|neft|rtgs|refund|salary|payroll|payment received|benefit|credited in)\b/i.test(msg)) {
+    res.type = 'credit';
+  }
+
+  // debit indicators
+  if (/\b(debited|withdrawn|purchase|purchased|spent|paid|payment to|withdrawal|atm|bill payment|merchant|merchant payment|card)\b/i.test(msg)) {
+    // 'card' often indicates a card transaction (usually debit), treat as debit if ambiguous
+    res.type = 'debit';
+  }
+
+  // disambiguate 'sent' usage
+  if (/\bsent\b/i.test(lower)) {
+    if (/\bsent to\b/i.test(lower) || /\bsent\s+rs\b/i.test(lower) || /\bsent₹|\bsent rs\./i.test(lower)) {
+      res.type = 'debit';
+    } else if (/\bsent from\b/i.test(lower)) {
+      res.type = 'credit';
+    }
+  }
+
+  // explicit DR/CR tokens
+  if (/\bdr[:\s-]/i.test(msg)) res.type = 'debit';
+  if (/\bcr[:\s-]/i.test(msg)) res.type = 'credit';
+
+  // Subtype detection: card vs account vs upi
+  if (/\b(card|card ending|cc|credit card|debit card|card no|card \d{4})\b/i.test(msg)) {
+    res.subtype = 'card';
+    if (!res.type) res.type = 'debit';
+  } else if (/\b(a\/c|account|ac|a c|a\.c\.)\b/i.test(msg)) {
+    res.subtype = 'account';
+  } else if (/\b(upi|vpa|gpay|phonepe|paytm|google pay|googlepay)\b/i.test(lower)) {
+    res.subtype = 'upi';
+  }
+
+  // Salary / employer detection heuristic (seed list: expand as needed)
+  var employerRegex = /\b(larsen and toubro|l&t|larsen|tata|infosys|wipro|hcl|tech mahindra|payroll|salary|net salary|salary credited)\b/i;
+  if (res.type === 'credit' && employerRegex.test(msg)) {
+    res.category = 'salary';
+  }
+
+  // Deposits to account -> credit
+  if (/\bdeposited\b/i.test(msg) && /\ba\/c\b|\baccount\b|\bxx\d{2,6}\b/i.test(msg)) {
+    res.type = 'credit';
+  }
+
+  // Fallback: if we have amount and no type, try weak heuristics
+  if (!res.type && res.amount !== null) {
+    if (/\bon\b|\bat\b|\bto\b/i.test(msg) && /\b(at|merchant|shop|store|amazon|flipkart|pay)\b/i.test(msg)) {
+      res.type = 'debit';
+    } else {
+      // leave unknown
+      res.type = null;
+    }
+  }
+
+  return res;
 }
 
 function extractBank(sender, msg) {
@@ -181,7 +324,8 @@ function processNewRawRows(sheet) {
   var histSheet = ss.getSheetByName('History Transactions');
   if (!histSheet) {
     histSheet = ss.insertSheet('History Transactions');
-    var outHeader = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash'];
+    // NOTE: MessageHash remains before Subtype/Category so loadExistingHashes still finds it.
+    var outHeader = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash','Subtype','Category'];
     histSheet.getRange(1,1,1,outHeader.length).setValues([outHeader]);
   } else {
     // ensure header contains MessageHash; add if missing
@@ -192,6 +336,14 @@ function processNewRawRows(sheet) {
     }
     if (!hasHash) {
       histSheet.getRange(1,currentHeaders.length+1).setValue('MessageHash');
+      // also add Subtype & Category columns if not present
+      histSheet.getRange(1,currentHeaders.length+2).setValue('Subtype');
+      histSheet.getRange(1,currentHeaders.length+3).setValue('Category');
+    } else {
+      // ensure Subtype & Category exist (append if missing)
+      var hdrLower = currentHeaders.map(function(h){return (''+h).toLowerCase();});
+      if (hdrLower.indexOf('subtype') === -1) histSheet.getRange(1,currentHeaders.length+1).setValue('Subtype');
+      if (hdrLower.indexOf('category') === -1) histSheet.getRange(1,histSheet.getLastColumn()+1).setValue('Category');
     }
   }
 
@@ -235,8 +387,22 @@ function processNewRawRows(sheet) {
     }
 
     var at = extractAmountAndType(msgStr);
+
+    // If OTP -> ignore explicitly
+    if (at && at.is_otp) {
+      Logger.log('Ignoring OTP message at raw row ' + (r+1) + ': ' + (msgStr||''));
+      continue;
+    }
+
+    // If informational limit/setting alert -> ignore explicitly
+    if (at && at.is_informational) {
+      Logger.log('Ignoring informational alert (limit/settings) at raw row ' + (r+1) + ': ' + (msgStr||''));
+      continue;
+    }
+
+    // Not a transaction (no amount) -> skip
     if (!at || at.amount === null) {
-      continue; // not a txn
+      continue;
     }
 
     var masks = extractFromToMasks(msgStr);
@@ -259,12 +425,14 @@ function processNewRawRows(sheet) {
       if (lowBank.indexOf(allowedKeywords[k]) !== -1) { keep = true; break; }
     }
     if (!keep) {
-      // skip entirely
+      // skip entirely if not an allowed bank
       continue;
     }
 
     var type = at.type || 'unknown';
     var amount = at.amount || 0;
+    var subtype = at.subtype || '';
+    var category = at.category || '';
     var suspicious = (amount >= SUSPICIOUS_THRESHOLD) ? 'Yes' : 'No';
     var dtFormatted = dt ? Utilities.formatDate(dt, tz, 'yyyy-MM-dd HH:mm:ss') : '';
 
@@ -277,8 +445,9 @@ function processNewRawRows(sheet) {
       continue;
     }
 
-    // append to History (store as string for readable history) + add hash
-    historyRows.push([dtFormatted, bank, type, amount, sender||'', fromMask||'', toMask||'', suspicious, ignoreReason, msgStr, r+1, rowHash]);
+    // append to History (store as string for readable history) + add hash + subtype/category
+    // header order: ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash','Subtype','Category']
+    historyRows.push([dtFormatted, bank, type, amount, sender||'', fromMask||'', toMask||'', suspicious, ignoreReason, msgStr, r+1, rowHash, subtype, category]);
 
     // mark locally to avoid duplicates within same run
     existingHashes[rowHash] = true;
@@ -289,11 +458,12 @@ function processNewRawRows(sheet) {
         var subject = 'Alert: Debit Transaction of Rs.' + amount.toFixed(2);
         var htmlBody = `<p>A debit transaction has been detected:</p>
           <table border="1" cellpadding="5" cellspacing="0">
-            <tr><th>DateTime</th><th>Bank</th><th>Amount</th><th>FromMask</th><th>ToMask</th><th>Message</th></tr>
+            <tr><th>DateTime</th><th>Bank</th><th>Amount</th><th>Subtype</th><th>FromMask</th><th>ToMask</th><th>Message</th></tr>
             <tr>
               <td>${escapeHtml(dtFormatted)}</td>
               <td>${escapeHtml(bank)}</td>
               <td>₹${amount.toFixed(2)}</td>
+              <td>${escapeHtml(subtype||'')}</td>
               <td>${escapeHtml(fromMask||'')}</td>
               <td>${escapeHtml(toMask||'')}</td>
               <td>${escapeHtml(msgStr).replace(/\n/g,'<br>')}</td>
@@ -307,13 +477,14 @@ function processNewRawRows(sheet) {
 
     // buffer suspicious pending (for nightly mail) if suspicious and not ignored
     if (suspicious === 'Yes' && !ignoreReason) {
-      suspiciousPendingRows.push([Utilities.formatDate(dt, tz, 'yyyy-MM-dd'), dtFormatted, bank, type, amount, sender||'', fromMask||'', toMask||'', msgStr, r+1]);
+      // spHeader: ['Date','DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Message','SourceRow','Subtype','Category']
+      suspiciousPendingRows.push([Utilities.formatDate(dt, tz, 'yyyy-MM-dd'), dtFormatted, bank, type, amount, sender||'', fromMask||'', toMask||'', msgStr, r+1, subtype, category]);
     }
 
     // add to today's table if txn date is today and not ignored
     if (dt && Utilities.formatDate(dt, tz, 'yyyy-MM-dd') === Utilities.formatDate(today, tz, 'yyyy-MM-dd') && !ignoreReason) {
-      // store Date object in first column for consistent date handling
-      todayRowsToAppend.push([dt, bank, type, amount, sender||'', fromMask||'', toMask||'', suspicious, '', msgStr, r+1]);
+      // today header: ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','Subtype','Category']
+      todayRowsToAppend.push([dt, bank, type, amount, sender||'', fromMask||'', toMask||'', suspicious, '', msgStr, r+1, subtype, category]);
     }
   }
 
@@ -321,19 +492,20 @@ function processNewRawRows(sheet) {
   if (historyRows.length > 0) {
     // histSheet is already ensured above to exist and have MessageHash header
     histSheet.getRange(histSheet.getLastRow()+1,1,historyRows.length,historyRows[0].length).setValues(historyRows);
+    // Amount column is column 4 -> keep number format
     histSheet.getRange(histSheet.getLastRow()-historyRows.length+1,4,historyRows.length,1).setNumberFormat('#,##0.00');
   }
 
   // append today rows to Today Transactions (first column is Date object)
   if (todayRowsToAppend.length > 0) {
     var todaySheet = ss.getSheetByName('Today Transactions');
-    var outHeaderT = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow'];
+    var outHeaderT = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','Subtype','Category'];
     if (!todaySheet) {
       todaySheet = ss.insertSheet('Today Transactions');
       todaySheet.getRange(1,1,1,outHeaderT.length).setValues([outHeaderT]);
     }
     todaySheet.getRange(todaySheet.getLastRow()+1,1,todayRowsToAppend.length,todayRowsToAppend[0].length).setValues(todayRowsToAppend);
-    // format first col as datetime and amount column as number
+    // format first col as datetime and amount column as number (amount is col 4)
     todaySheet.getRange(todaySheet.getLastRow()-todayRowsToAppend.length+1,1,todayRowsToAppend.length,1).setNumberFormat('yyyy-MM-dd HH:mm:ss');
     todaySheet.getRange(todaySheet.getLastRow()-todayRowsToAppend.length+1,4,todayRowsToAppend.length,1).setNumberFormat('#,##0.00');
   }
@@ -341,12 +513,13 @@ function processNewRawRows(sheet) {
   // append suspicious pending rows
   if (suspiciousPendingRows.length > 0) {
     var sp = ss.getSheetByName('Suspicious Pending');
-    var spHeader = ['Date','DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Message','SourceRow'];
+    var spHeader = ['Date','DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Message','SourceRow','Subtype','Category'];
     if (!sp) {
       sp = ss.insertSheet('Suspicious Pending');
       sp.getRange(1,1,1,spHeader.length).setValues([spHeader]);
     }
     sp.getRange(sp.getLastRow()+1,1,suspiciousPendingRows.length,suspiciousPendingRows[0].length).setValues(suspiciousPendingRows);
+    // Amount is column 5 in this sheet
     sp.getRange(sp.getLastRow()-suspiciousPendingRows.length+1,5,suspiciousPendingRows.length,1).setNumberFormat('#,##0.00');
   }
 
@@ -390,8 +563,8 @@ function updateTodaySummary() {
         // Skip rows that do not belong to today's date
         if (rowDateStr !== todayStr) continue;
 
-        var type = (row[2] || '').toString().toLowerCase();
-        var amount = parseFloat(row[3]) || 0;
+        var type = (row[2] || '').toString().toLowerCase();   // Type is at index 2
+        var amount = parseFloat(row[3]) || 0;                // Amount is at index 3
         var suspicious = (row[7] || 'No').toString().toLowerCase();
 
         if (type === 'debit') { totalDebit += amount; countDebit++; }
@@ -571,7 +744,7 @@ function sendDailyTransactionsEmailAt10PM() {
 
   // After sending, clear Today's sheets (reset them so next day starts fresh)
   if (todaySheet) {
-    var outHeaderT = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow'];
+    var outHeaderT = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','Subtype','Category'];
     todaySheet.clearContents();
     todaySheet.getRange(1,1,1,outHeaderT.length).setValues([outHeaderT]);
   }
