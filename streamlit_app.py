@@ -31,7 +31,11 @@ except Exception:
 # ------------------ Sidebar: data source & options ------------------
 with st.sidebar:
     st.header("Data input & options")
-    data_source = st.radio("Load data from", ["Upload CSV/XLSX", "Google Sheet (optional)", "Use sample data"], index=0)
+    data_source = st.radio(
+        "Load data from",
+        ["Upload CSV/XLSX", "Google Sheet (optional)", "Use sample data"],
+        index=0
+    )
 
     SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
     RANGE = st.text_input("Range or Sheet Name", value="History Transactions")
@@ -282,15 +286,21 @@ else:
         series_selected = []
         if show_debit: series_selected.append('Total_Spent')
         if show_credit: series_selected.append('Total_Credit')
-        charts_mod.render_chart(plot_df=plot_df, converted_df=converted_df_filtered, chart_type=chart_type, series_selected=series_selected, top_n=5)
+        charts_mod.render_chart(
+            plot_df=plot_df,
+            converted_df=converted_df_filtered,
+            chart_type=chart_type,
+            series_selected=series_selected,
+            top_n=5
+        )
     else:
         st.info("charts.py not available; install or add charts.py for visualizations.")
 
-# ------------------ Rows view & download ----------------
+# ------------------ Rows view & download (show only selected columns) ----------------
 st.subheader("Rows (matching selection)")
 rows_df = converted_df_filtered.copy()  # use the filtered transactions so rows match chart
 
-# ensure timestamp exists
+# ensure timestamp exists (original logic)
 if 'timestamp' in rows_df.columns:
     rows_df['timestamp'] = pd.to_datetime(rows_df['timestamp'], errors='coerce')
 else:
@@ -299,14 +309,73 @@ else:
     else:
         rows_df['timestamp'] = pd.NaT
 
-# apply date-range filter to rows
+# apply date-range filter to rows (if available)
 if sel_date_range and sel_date_range[0] and sel_date_range[1]:
-    rows_df = rows_df[(rows_df['timestamp'].dt.date >= sel_date_range[0]) & (rows_df['timestamp'].dt.date <= sel_date_range[1])]
+    rows_df = rows_df[
+        (rows_df['timestamp'].dt.date >= sel_date_range[0]) &
+        (rows_df['timestamp'].dt.date <= sel_date_range[1])
+    ]
 
-if rows_df.empty:
-    st.write("No rows match the current filters/selection.")
-else:
+# Desired columns (case-insensitive)
+_desired = ['timestamp', 'bank', 'type', 'amount', 'suspicious']
+
+# Map actual columns in the dataframe (preserve original casing)
+col_map = {c.lower(): c for c in rows_df.columns}
+
+display_cols = []
+for d in _desired:
+    if d in col_map:
+        display_cols.append(col_map[d])
+
+# If timestamp not found but 'date' exists, include it
+if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map:
+    display_cols.insert(0, col_map['date'])
+
+# If we couldn't find any of the desired columns, show the full table as a fallback
+if not display_cols:
+    st.warning("None of the preferred columns (timestamp, Bank, Type, Amount, Suspicious) were found — showing full table.")
     st.dataframe(rows_df.reset_index(drop=True))
     csv_bytes = rows_df.to_csv(index=False).encode("utf-8")
+    st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
+else:
+    # Build the display dataframe with the columns we found
+    display_df = rows_df[display_cols].copy()
+
+    # Format timestamp-like column (if present)
+    for c in display_df.columns:
+        if c.lower() == 'timestamp' or c.lower() == 'date' or c.lower().startswith('date'):
+            display_df[c] = pd.to_datetime(display_df[c], errors='coerce')
+            # display nicely as ISO strings
+            display_df[c] = display_df[c].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+
+    # Coerce amount to numeric if present
+    for c in display_df.columns:
+        if c.lower() == 'amount':
+            display_df[c] = pd.to_numeric(display_df[c], errors='coerce')
+
+    # Pretty rename columns
+    pretty_rename = {}
+    for c in display_df.columns:
+        lc = c.lower()
+        if lc == 'timestamp' or lc == 'date' or lc.startswith('date'):
+            pretty_rename[c] = 'Timestamp'
+        elif lc == 'bank':
+            pretty_rename[c] = 'Bank'
+        elif lc == 'type':
+            pretty_rename[c] = 'Type'
+        elif lc == 'amount':
+            pretty_rename[c] = 'Amount'
+        elif lc == 'suspicious':
+            pretty_rename[c] = 'Suspicious'
+    if pretty_rename:
+        display_df = display_df.rename(columns=pretty_rename)
+
+    # Ensure order: Timestamp, Bank, Type, Amount, Suspicious (include whichever exist)
+    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Suspicious'] if c in display_df.columns]
+    display_df = display_df[final_order]
+
+    # Show table and download only these columns
+    st.dataframe(display_df.reset_index(drop=True))
+    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
