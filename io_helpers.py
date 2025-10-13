@@ -1,8 +1,9 @@
-# io_helpers.py -- data I/O helpers (pure functions, no Streamlit)
+# io_helpers.py -- data I/O helpers (pure functions, now with Streamlit caching)
 import json
 import os
 from typing import Any, Dict, List, Tuple, Optional
 import pandas as pd
+import streamlit as st
 
 # Optional Google Sheets imports (will raise only when used)
 try:
@@ -91,6 +92,7 @@ def build_sheets_service_from_file(creds_file: str):
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
+@st.cache_data(ttl=600)
 def read_google_sheet(spreadsheet_id: str, range_name: str,
                       creds_info: Optional[Dict] = None, creds_file: Optional[str] = None,
                       secrets: Optional[Dict] = None) -> pd.DataFrame:
@@ -99,6 +101,8 @@ def read_google_sheet(spreadsheet_id: str, range_name: str,
     - creds_info: parsed JSON dict for service account
     - creds_file: path to service account JSON on disk
     - secrets: optional dict (e.g., st.secrets) - used if creds_info / creds_file not provided
+
+    This function is cached by Streamlit for 10 minutes by default (ttl=600).
     """
     # prefer explicit creds_info / creds_file; else try secrets['gcp_service_account']
     if creds_info is None and (creds_file is None or not os.path.exists(creds_file)):
