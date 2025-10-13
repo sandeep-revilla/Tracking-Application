@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import importlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 st.set_page_config(page_title="Daily Spend", layout="wide")
 st.title("💳 Daily Spending")
@@ -379,62 +379,111 @@ else:
     csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
-# ------------------ Today's totals (credit/debit summary) ----------------
-st.markdown("### Today's totals (filtered view)")
+# ------------------ Date selector for totals (calendar) ------------------
+# Provide a simple calendar input in the sidebar to choose a single date or a date range for the totals.
+# We'll compute totals for the selected date or date-range (instead of always using "today").
+
+# Build safe min/max from available rows (fallback to last 365 days)
+try:
+    tmp = converted_df_filtered.copy()
+    if 'timestamp' in tmp.columns:
+        tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], errors='coerce')
+    elif 'date' in tmp.columns:
+        tmp['timestamp'] = pd.to_datetime(tmp['date'], errors='coerce')
+    else:
+        tmp['timestamp'] = pd.NaT
+    valid_dates = tmp['timestamp'].dropna()
+    if not valid_dates.empty:
+        min_date = valid_dates.min().date()
+        max_date = valid_dates.max().date()
+    else:
+        max_date = datetime.utcnow().date()
+        min_date = max_date - timedelta(days=365)
+except Exception:
+    max_date = datetime.utcnow().date()
+    min_date = max_date - timedelta(days=365)
+
+with st.sidebar:
+    st.markdown("---")
+    st.write("Select a date (or range) for the totals below")
+    totals_mode = st.radio("Totals mode", ["Single date", "Date range"], index=0)
+    if totals_mode == "Single date":
+        selected_date = st.date_input("Pick date", value=datetime.utcnow().date(), min_value=min_date, max_value=max_date)
+        selected_date_range_for_totals = (selected_date, selected_date)
+    else:
+        # date_input with tuple returns (start, end)
+        default_range = (min_date, max_date)
+        dr = st.date_input("Pick start & end", value=default_range, min_value=min_date, max_value=max_date)
+        # dr might be a single date if user selects only one; ensure a tuple
+        if isinstance(dr, tuple) or isinstance(dr, list):
+            selected_date_range_for_totals = (dr[0], dr[1])
+        else:
+            selected_date_range_for_totals = (dr, dr)
+
+# ------------------ Totals for selected date / range ------------------
+st.markdown("### Totals for selected date / range (filtered view)")
 
 try:
-    # Work on the underlying rows_df (not the pretty display_df) because it has original types
-    # If timestamp column missing, we already set rows_df['timestamp'] above
-    today_date = pd.Timestamp.utcnow().date()
-
-    # Ensure timestamp column exists and is datetime
-    if 'timestamp' in rows_df.columns:
-        rows_df['timestamp'] = pd.to_datetime(rows_df['timestamp'], errors='coerce')
+    # Work on a copy of filtered rows_df that already had timestamp normalized
+    tmp_rows = rows_df.copy()
+    if 'timestamp' in tmp_rows.columns:
+        tmp_rows['timestamp'] = pd.to_datetime(tmp_rows['timestamp'], errors='coerce')
     else:
-        rows_df['timestamp'] = pd.NaT
+        tmp_rows['timestamp'] = pd.NaT
 
-    # Select today's rows (UTC)
-    mask_today = pd.to_datetime(rows_df['timestamp'], errors='coerce').dt.date == today_date
-    today_df = rows_df[mask_today].copy()
+    start_sel, end_sel = selected_date_range_for_totals
+    if start_sel is None:
+        start_sel = min_date
+    if end_sel is None:
+        end_sel = max_date
 
-    # Find actual column names for Amount and Type (case-insensitive)
-    col_map_lower = {c.lower(): c for c in today_df.columns}
+    # ensure date types
+    if isinstance(start_sel, datetime):
+        start_sel = start_sel.date()
+    if isinstance(end_sel, datetime):
+        end_sel = end_sel.date()
+
+    # mask rows inside selection (inclusive)
+    mask_sel = tmp_rows['timestamp'].dt.date.between(start_sel, end_sel)
+    sel_df = tmp_rows[mask_sel].copy()
+
+    # find case-insensitive column names
+    col_map_lower = {c.lower(): c for c in sel_df.columns}
     amount_col = col_map_lower.get('amount')
     type_col = col_map_lower.get('type')
 
-    if today_df.empty:
-        st.info("No transactions for today (based on timestamp).")
+    if sel_df.empty:
+        st.info(f"No transactions for selected date/range ({start_sel} to {end_sel}).")
+        credit_sum = 0.0
+        debit_sum = 0.0
+        credit_count = 0
+        debit_count = 0
     else:
-        # compute sums and counts
         if amount_col is None:
-            # no amount column -> treat sums as zero
             credit_sum = 0.0
             debit_sum = 0.0
             credit_count = 0
             debit_count = 0
         else:
-            # if type column exists, use it; otherwise try to infer from text columns
             if type_col is not None:
-                today_df['type_norm'] = today_df[type_col].astype(str).str.lower().str.strip()
-                credit_mask = today_df['type_norm'] == 'credit'
-                debit_mask = today_df['type_norm'] == 'debit'
-                credit_sum = pd.to_numeric(today_df.loc[credit_mask, amount_col], errors='coerce').fillna(0.0).sum()
-                debit_sum = pd.to_numeric(today_df.loc[debit_mask, amount_col], errors='coerce').fillna(0.0).sum()
+                sel_df['type_norm'] = sel_df[type_col].astype(str).str.lower().str.strip()
+                credit_mask = sel_df['type_norm'] == 'credit'
+                debit_mask = sel_df['type_norm'] == 'debit'
+                credit_sum = pd.to_numeric(sel_df.loc[credit_mask, amount_col], errors='coerce').fillna(0.0).sum()
+                debit_sum = pd.to_numeric(sel_df.loc[debit_mask, amount_col], errors='coerce').fillna(0.0).sum()
                 credit_count = int(credit_mask.sum())
                 debit_count = int(debit_mask.sum())
             else:
-                # no explicit Type column - fallback heuristic: search 'credit' in text columns to classify
+                # no Type column - fallback heuristic
                 credit_sum = 0.0
                 debit_sum = 0.0
                 credit_count = 0
                 debit_count = 0
-                # text columns to inspect
-                text_cols = [c for c in today_df.columns if today_df[c].dtype == object]
-                for _, r in today_df.iterrows():
+                text_cols = [c for c in sel_df.columns if sel_df[c].dtype == object]
+                for _, r in sel_df.iterrows():
                     amt = pd.to_numeric(r.get(amount_col, 0), errors='coerce')
                     if pd.isna(amt):
                         amt = 0.0
-                    # combine text
                     txt = " ".join(str(r[c]) for c in text_cols if pd.notna(r[c])).lower()
                     if 'credit' in txt:
                         credit_sum += amt
@@ -443,12 +492,11 @@ try:
                         debit_sum += amt
                         debit_count += 1
 
-        # Show as three metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Today's Credits", f"₹{credit_sum:,.0f}", f"{credit_count} txns")
-        col2.metric("Today's Debits", f"₹{debit_sum:,.0f}", f"{debit_count} txns")
-        col3.metric("Net Today", f"₹{(credit_sum - debit_sum):,.0f}")
+    # Show as three metrics horizontally
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"Credits ({start_sel} → {end_sel})", f"₹{credit_sum:,.0f}", f"{credit_count} txns")
+    col2.metric(f"Debits ({start_sel} → {end_sel})", f"₹{debit_sum:,.0f}", f"{debit_count} txns")
+    col3.metric("Net (Credits − Debits)", f"₹{(credit_sum - debit_sum):,.0f}")
 
 except Exception as e:
-    st.error(f"Failed to compute today's totals: {e}")
-
+    st.error(f"Failed to compute totals for selected date/range: {e}")
