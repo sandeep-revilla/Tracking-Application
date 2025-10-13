@@ -37,7 +37,7 @@ with st.sidebar:
         index=0
     )
 
-    SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
+    SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk")
     RANGE = st.text_input("Range or Sheet Name", value="History Transactions")
     CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
 
