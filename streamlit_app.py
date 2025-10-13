@@ -1,4 +1,4 @@
-# streamlit_app.py - main Streamlit entrypoint (with safe Google Sheet handling)
+# streamlit_app.py - main Streamlit entrypoint (with safe Google Sheet handling + bank filter)
 import streamlit as st
 import pandas as pd
 import importlib
@@ -109,6 +109,65 @@ def sample_data():
         rows.append({"timestamp": pd.to_datetime(d), "description": f"Sample txn {i+1}", "Amount": amt, "Type": t})
     return pd.DataFrame(rows)
 
+
+# ------------------ Helper: bank detection & filtering ------------------
+def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
+    """
+    Ensure df has a 'Bank' column. If missing (or overwrite=True), try to detect bank name
+    from common text fields: 'bank', 'account', 'description', 'message', 'narration', 'beneficiary', 'merchant'.
+    Returns a new DataFrame with 'Bank' column (string), unknowns marked 'Unknown'.
+    """
+    df = df.copy()
+    if 'Bank' in df.columns and not overwrite:
+        # normalize existing Bank column values to strings and fillna
+        df['Bank'] = df['Bank'].astype(str).where(df['Bank'].notna(), None)
+        df['Bank'] = df['Bank'].fillna('Unknown')
+        return df
+
+    # candidate text columns to scan
+    cand_cols = ['bank', 'account', 'account_name', 'description', 'message', 'narration', 'merchant', 'beneficiary', 'note']
+    # build a combined lowercased text for each row
+    def _row_text(row):
+        parts = []
+        for c in cand_cols:
+            if c in row.index and pd.notna(row[c]):
+                parts.append(str(row[c]))
+        return " ".join(parts).lower()
+
+    # mapping patterns -> normalized bank name (extend as needed)
+    bank_map = {
+        'hdfc': 'HDFC Bank',
+        'hdfc bank': 'HDFC Bank',
+        'hdfcbank': 'HDFC Bank',
+        'hdfc card': 'HDFC Bank',
+        'hdfccredit': 'HDFC Bank',
+        'indian bank': 'Indian Bank',
+        'indianbank': 'Indian Bank',
+        'indian bank ltd': 'Indian Bank',
+        # add more heuristics if needed
+    }
+
+    # compute combined text column (vectorized using apply)
+    try:
+        combined = df.apply(_row_text, axis=1)
+    except Exception:
+        # fallback: if apply fails (weird dtypes), create empty series
+        combined = pd.Series([''] * len(df), index=df.index)
+
+    detected = []
+    for text in combined:
+        found = None
+        for patt, name in bank_map.items():
+            if patt in text:
+                found = name
+                break
+        detected.append(found if found is not None else None)
+
+    df['Bank'] = detected
+    df['Bank'] = df['Bank'].fillna('Unknown')
+    return df
+
+
 # ------------------ Load raw data according to selection ----------------
 uploaded = None
 if data_source == "Upload CSV/XLSX":
@@ -137,8 +196,34 @@ if df_raw is None or df_raw.empty:
 with st.spinner("Cleaning and deriving columns..."):
     converted_df = transform.convert_columns_and_derives(df_raw)
 
+# ensure bank column exists (detect heuristically if needed)
+converted_df = add_bank_column(converted_df, overwrite=False)
+
+# ------------------ Sidebar: Bank filter ------------------
+with st.sidebar:
+    st.markdown("---")
+    st.write("Filter by Bank")
+    # detect unique banks and sort; prefer to show HDFC/Indian selected if present
+    banks_detected = sorted([b for b in converted_df['Bank'].unique() if pd.notna(b)])
+    # default selection logic: if HDFC/Indian present select them, else select all
+    defaults = []
+    if 'HDFC Bank' in banks_detected:
+        defaults.append('HDFC Bank')
+    if 'Indian Bank' in banks_detected:
+        defaults.append('Indian Bank')
+    if not defaults:
+        defaults = banks_detected  # select all by default if HDFC/Indian not found
+    sel_banks = st.multiselect("Banks", options=banks_detected, default=defaults)
+
+# filter converted_df according to selection
+if sel_banks:
+    converted_df_filtered = converted_df[converted_df['Bank'].isin(sel_banks)].copy()
+else:
+    converted_df_filtered = converted_df.copy()
+
+# ------------------ Compute daily totals (from filtered transactions) ----------------
 with st.spinner("Computing daily totals..."):
-    merged = transform.compute_daily_totals(converted_df)
+    merged = transform.compute_daily_totals(converted_df_filtered)
 
 # ------------------ Sidebar: Date filters ------------------
 with st.sidebar:
@@ -197,13 +282,13 @@ else:
         series_selected = []
         if show_debit: series_selected.append('Total_Spent')
         if show_credit: series_selected.append('Total_Credit')
-        charts_mod.render_chart(plot_df=plot_df, converted_df=converted_df, chart_type=chart_type, series_selected=series_selected, top_n=5)
+        charts_mod.render_chart(plot_df=plot_df, converted_df=converted_df_filtered, chart_type=chart_type, series_selected=series_selected, top_n=5)
     else:
         st.info("charts.py not available; install or add charts.py for visualizations.")
 
 # ------------------ Rows view & download ----------------
 st.subheader("Rows (matching selection)")
-rows_df = converted_df.copy()
+rows_df = converted_df_filtered.copy()  # use the filtered transactions so rows match chart
 
 # ensure timestamp exists
 if 'timestamp' in rows_df.columns:
@@ -230,5 +315,6 @@ st.markdown("""
 ---
 **Notes:**  
 - `io_helpers.read_google_sheet` expects a plain dict (`creds_info`) or a file path (`creds_file`).  
-- We parse `st.secrets['gcp_service_account']` into a plain dict before calling the cached function to avoid Streamlit hashing errors.
+- We parse `st.secrets['gcp_service_account']` into a plain dict before calling the cached function to avoid Streamlit hashing errors.  
+- Bank detection is heuristic and looks for substrings (e.g., 'hdfc', 'indian bank') in description/message fields. You can extend `bank_map` in the code to improve detection.
 """)
