@@ -1,29 +1,33 @@
-# streamlit_app.py - main Streamlit entrypoint (imports transform.py and io.py)
+# streamlit_app.py - main Streamlit entrypoint (imports transform.py and io_helpers.py)
 import streamlit as st
 import pandas as pd
 import altair as alt
 import importlib
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Daily Spend (with io + transform)", layout="wide")
-st.title("💳 Daily Spending — io + transform integrated (starter)")
+st.set_page_config(page_title="Daily Spend (with io_helpers + transform)", layout="wide")
+st.title("💳 Daily Spending — io_helpers + transform integrated (starter)")
 
 # ---------------- PLACEHOLDERS / FUTURE IMPORTS ----------------
-# We already have transform.py implemented (pure transform functions).
-# We'll import io.py (data loading helpers) now.
-# Placeholder for charts.py (visualization helpers) remains here for future:
-#   charts_mod = importlib.import_module("charts")    # <- implement later
-try:
-    io_mod = importlib.import_module("io")
-except Exception as e:
-    io_mod = None  # io functions will only be used if available; app can still use upload/sample fallback
-
+# transform.py must exist (we implemented it earlier).
 try:
     transform = importlib.import_module("transform")
 except Exception as e:
     st.error("transform.py missing or failing to import. Add transform.py to the same directory.")
     st.exception(e)
     st.stop()
+
+# import local I/O helpers (renamed to avoid conflict with Python stdlib 'io')
+try:
+    import io_helpers as io_mod
+except Exception:
+    io_mod = None  # app will still work with upload/sample fallback
+
+# Placeholder for charts module (implement later)
+# try:
+#     charts_mod = importlib.import_module("charts")
+# except Exception:
+#     charts_mod = None
 
 # ---------------- Sidebar: data source & options ----------------
 with st.sidebar:
@@ -67,11 +71,11 @@ def load_from_upload(uploaded_file) -> pd.DataFrame:
 
 def load_from_sheet_safe(sheet_id: str, range_name: str, creds_file: str) -> pd.DataFrame:
     """
-    Wrapper that calls io_mod.read_google_sheet if io_mod is present.
-    It does not use st.secrets inside io_mod directly; pass st.secrets here.
+    Wrapper that calls io_helpers.read_google_sheet if io_helpers is present.
+    Passes st.secrets to io_helpers so credentials can come from st.secrets.
     """
     if io_mod is None:
-        st.error("io.py not available. Install or add io.py to the project to use Google Sheets.")
+        st.error("io_helpers.py not available. Add io_helpers.py to the project to use Google Sheets.")
         return pd.DataFrame()
     try:
         secrets = st.secrets if hasattr(st, "secrets") else None
@@ -246,7 +250,7 @@ else:
 st.markdown("""
 ---
 **Notes:**  
-- `io.py` provides Google Sheets read functionality; if not present the app still works using upload/sample data.  
+- `io_helpers.py` provides Google Sheets read functionality; if not present the app still works using upload/sample data.  
 - `transform.py` is used to clean and aggregate; keep it in the repo.  
 - `charts.py` is a planned module (placeholder) — we'll move plotting into it in the next step.
 """)
