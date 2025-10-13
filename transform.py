@@ -19,6 +19,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
       - create 'date' column (date part of timestamp)
       - infer Type ('debit'/'credit') if missing based on sign of Amount
     Returns a cleaned DataFrame (does not mutate input).
+    Rows where Type is unknown are dropped.
     """
     if df is None:
         return pd.DataFrame()
@@ -88,7 +89,7 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     if 'Amount' in df.columns:
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').astype('float64')
     else:
-        # create Amount with zeros if nothing found
+        # create Amount with NA if nothing found
         df['Amount'] = pd.NA
 
     # 3) Create canonical timestamp and date columns
@@ -125,6 +126,21 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
             df['Type'] = df['Type'].astype(str).str.lower().str.strip()
         except Exception:
             pass
+
+    # Normalize Type column to canonical lower-case strings and mark empties as 'unknown'
+    try:
+        df['Type'] = df['Type'].astype(str).str.lower().str.strip()
+        df['Type'] = df['Type'].replace({'nan': 'unknown', 'none': 'unknown', '': 'unknown', 'na': 'unknown', 'null': 'unknown'})
+    except Exception:
+        # fallback: if normalization fails, set everything to unknown to be safe
+        df['Type'] = 'unknown'
+
+    # DROP rows where Type is unknown (user requested)
+    try:
+        df = df[df['Type'] != 'unknown'].copy()
+    except Exception:
+        # if something unexpected happens, keep dataframe as-is
+        pass
 
     # final reorder: put timestamp and date at front
     cols = list(df.columns)
