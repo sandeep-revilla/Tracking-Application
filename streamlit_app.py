@@ -1,20 +1,19 @@
-# app.py - main Streamlit app (orchestrates io.py, transform.py, charts.py)
+# streamlit_app.py - main Streamlit entrypoint (orchestrates io.py, transform.py, charts.py)
 import streamlit as st
 import pandas as pd
 import importlib
-from datetime import date
 
 st.set_page_config(page_title="Sheet → Daily Spend (modular)", layout="wide")
-st.title("💳 Daily Spending — Modular Version")
+st.title("💳 Daily Spending — Modular Version (streamlit_app.py)")
 
-# Import local modules (fail fast with helpful message)
+# Try to import helper modules that should live in the same directory
 try:
     io_mod = importlib.import_module("io")
     tf = importlib.import_module("transform")
     charts_mod = importlib.import_module("charts")
 except Exception as e:
     st.error("Required helper modules not found. Make sure io.py, transform.py and charts.py "
-             "exist in the same directory as app.py.")
+             "exist in the same directory as streamlit_app.py.")
     st.exception(e)
     st.stop()
 
@@ -60,10 +59,10 @@ with st.sidebar:
 @st.cache_data(ttl=300)
 def load_data_from_sheet(sheet_id: str, range_name: str, creds_file: str, secrets: dict):
     try:
-        df = io_mod.read_google_sheet(sheet_id, range_name, creds_file=creds_file, creds_info=None, secrets=secrets)
+        df = io_mod.read_google_sheet(sheet_id, range_name, creds_info=None, creds_file=creds_file) \
+            if (secrets is None or "gcp_service_account" not in secrets) else io_mod.read_google_sheet(sheet_id, range_name, creds_info=secrets.get("gcp_service_account"), creds_file=None)
         return df
     except Exception as e:
-        # surface an error in app flow (but return empty df for graceful downstream handling)
         st.error(f"Failed to read Google Sheet: {e}")
         return pd.DataFrame()
 
