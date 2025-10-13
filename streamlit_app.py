@@ -379,3 +379,76 @@ else:
     csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
+# ------------------ Today's totals (credit/debit summary) ----------------
+st.markdown("### Today's totals (filtered view)")
+
+try:
+    # Work on the underlying rows_df (not the pretty display_df) because it has original types
+    # If timestamp column missing, we already set rows_df['timestamp'] above
+    today_date = pd.Timestamp.utcnow().date()
+
+    # Ensure timestamp column exists and is datetime
+    if 'timestamp' in rows_df.columns:
+        rows_df['timestamp'] = pd.to_datetime(rows_df['timestamp'], errors='coerce')
+    else:
+        rows_df['timestamp'] = pd.NaT
+
+    # Select today's rows (UTC)
+    mask_today = pd.to_datetime(rows_df['timestamp'], errors='coerce').dt.date == today_date
+    today_df = rows_df[mask_today].copy()
+
+    # Find actual column names for Amount and Type (case-insensitive)
+    col_map_lower = {c.lower(): c for c in today_df.columns}
+    amount_col = col_map_lower.get('amount')
+    type_col = col_map_lower.get('type')
+
+    if today_df.empty:
+        st.info("No transactions for today (based on timestamp).")
+    else:
+        # compute sums and counts
+        if amount_col is None:
+            # no amount column -> treat sums as zero
+            credit_sum = 0.0
+            debit_sum = 0.0
+            credit_count = 0
+            debit_count = 0
+        else:
+            # if type column exists, use it; otherwise try to infer from text columns
+            if type_col is not None:
+                today_df['type_norm'] = today_df[type_col].astype(str).str.lower().str.strip()
+                credit_mask = today_df['type_norm'] == 'credit'
+                debit_mask = today_df['type_norm'] == 'debit'
+                credit_sum = pd.to_numeric(today_df.loc[credit_mask, amount_col], errors='coerce').fillna(0.0).sum()
+                debit_sum = pd.to_numeric(today_df.loc[debit_mask, amount_col], errors='coerce').fillna(0.0).sum()
+                credit_count = int(credit_mask.sum())
+                debit_count = int(debit_mask.sum())
+            else:
+                # no explicit Type column - fallback heuristic: search 'credit' in text columns to classify
+                credit_sum = 0.0
+                debit_sum = 0.0
+                credit_count = 0
+                debit_count = 0
+                # text columns to inspect
+                text_cols = [c for c in today_df.columns if today_df[c].dtype == object]
+                for _, r in today_df.iterrows():
+                    amt = pd.to_numeric(r.get(amount_col, 0), errors='coerce')
+                    if pd.isna(amt):
+                        amt = 0.0
+                    # combine text
+                    txt = " ".join(str(r[c]) for c in text_cols if pd.notna(r[c])).lower()
+                    if 'credit' in txt:
+                        credit_sum += amt
+                        credit_count += 1
+                    else:
+                        debit_sum += amt
+                        debit_count += 1
+
+        # Show as three metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Today's Credits", f"₹{credit_sum:,.0f}", f"{credit_count} txns")
+        col2.metric("Today's Debits", f"₹{debit_sum:,.0f}", f"{debit_count} txns")
+        col3.metric("Net Today", f"₹{(credit_sum - debit_sum):,.0f}")
+
+except Exception as e:
+    st.error(f"Failed to compute today's totals: {e}")
+
