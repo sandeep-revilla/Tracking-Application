@@ -329,7 +329,7 @@ function processNewRawRows(sheet) {
   if (!histSheet) {
     histSheet = ss.insertSheet('History Transactions');
     // NOTE: MessageHash remains before Subtype/Category so loadExistingHashes still finds it.
-    var outHeader = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash','Subtype','Category'];
+    var outHeader = ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash','Subtype','Category','is_deleted'];
     histSheet.getRange(1,1,1,outHeader.length).setValues([outHeader]);
   } else {
     // ensure header contains MessageHash; add if missing
@@ -340,14 +340,19 @@ function processNewRawRows(sheet) {
     }
     if (!hasHash) {
       histSheet.getRange(1,currentHeaders.length+1).setValue('MessageHash');
-      // also add Subtype & Category columns if not present
+      // also add Subtype & Category & is_deleted columns if not present
       histSheet.getRange(1,currentHeaders.length+2).setValue('Subtype');
       histSheet.getRange(1,currentHeaders.length+3).setValue('Category');
+      histSheet.getRange(1,currentHeaders.length+4).setValue('is_deleted');
     } else {
-      // ensure Subtype & Category exist (append if missing)
+      // ensure Subtype & Category & is_deleted exist (append if missing)
       var hdrLower = currentHeaders.map(function(h){return (''+h).toLowerCase();});
       if (hdrLower.indexOf('subtype') === -1) histSheet.getRange(1,currentHeaders.length+1).setValue('Subtype');
       if (hdrLower.indexOf('category') === -1) histSheet.getRange(1,histSheet.getLastColumn()+1).setValue('Category');
+      // re-read headers if we appended above
+      currentHeaders = histSheet.getRange(1,1,1,histSheet.getLastColumn()).getValues()[0];
+      hdrLower = currentHeaders.map(function(h){return (''+h).toLowerCase();});
+      if (hdrLower.indexOf('is_deleted') === -1) histSheet.getRange(1,histSheet.getLastColumn()+1).setValue('is_deleted');
     }
   }
 
@@ -456,9 +461,9 @@ function processNewRawRows(sheet) {
       continue;
     }
 
-    // append to History (store as string for readable history) + add hash + subtype/category
-    // header order: ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash','Subtype','Category']
-    historyRows.push([dtFormatted, bank, type, amount, sender||'', fromMask||'', toMask||'', suspicious, ignoreReason, msgStr, r+1, rowHash, subtype, category]);
+    // append to History (store as string for readable history) + add hash + subtype/category + is_deleted (default false)
+    // header order: ['DateTime','Bank','Type','Amount','Sender','FromMask','ToMask','Suspicious','IgnoreReason','Message','SourceRow','MessageHash','Subtype','Category','is_deleted']
+    historyRows.push([dtFormatted, bank, type, amount, sender||'', fromMask||'', toMask||'', suspicious, ignoreReason, msgStr, r+1, rowHash, subtype, category, 'false']);
 
     // mark locally to avoid duplicates within same run
     existingHashes[rowHash] = true;
