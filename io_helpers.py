@@ -144,8 +144,9 @@ def read_google_sheet(spreadsheet_id: str, range_name: str,
 
 
 # ---------------------------------------------------------------------
-# New write helpers
+# New write helpers (ensure headers sync between history + append, safe append)
 # ---------------------------------------------------------------------
+
 
 def _get_write_service(creds_info: Optional[Dict] = None, creds_file: Optional[str] = None):
     """
@@ -160,6 +161,87 @@ def _get_write_service(creds_info: Optional[Dict] = None, creds_file: Optional[s
         return build_sheets_service_write_from_file(creds_file)
 
 
+def ensure_sheet_headers_match(spreadsheet_id: str,
+                               history_range: Optional[str],
+                               append_range: str,
+                               creds_info: Optional[Dict] = None,
+                               creds_file: Optional[str] = None) -> Dict:
+    """
+    Ensure the Append sheet header contains all columns present in the History sheet header.
+    - If append sheet is missing columns from history, add them to the end of the append header
+      and extend existing data rows with empty cells so columns align.
+    - If history_range is None, this becomes a no-op (returns ok) — useful when only append header is known.
+    Returns dict {status: 'ok'|'error', 'added': [cols], 'message': str}
+    """
+    service = _get_write_service(creds_info, creds_file)
+    sheet = service.spreadsheets()
+
+    # Read history header
+    history_header = []
+    if history_range:
+        try:
+            res_h = sheet.values().get(spreadsheetId=spreadsheet_id, range=history_range).execute()
+            vals_h = res_h.get("values", [])
+            if vals_h:
+                history_header = [str(x).strip() for x in vals_h[0]]
+        except HttpError as e:
+            return {"status": "error", "message": f"Failed to read history sheet header: {e}"}
+
+    # Read append sheet header + data rows
+    try:
+        res_a = sheet.values().get(spreadsheetId=spreadsheet_id, range=append_range).execute()
+        vals_a = res_a.get("values", [])
+    except HttpError as e:
+        return {"status": "error", "message": f"Failed to read append sheet: {e}"}
+
+    append_header, append_rows = _normalize_rows(vals_a)
+
+    # If append is empty and history header exists, create append header from history header
+    if (not append_header or all((h == "" for h in append_header))) and history_header:
+        append_header = history_header.copy()
+        # write header and leave no data rows
+        try:
+            sheet.values().update(
+                spreadsheetId=spreadsheet_id,
+                range=append_range,
+                valueInputOption='USER_ENTERED',
+                body={'values': [append_header]}
+            ).execute()
+            return {"status": "ok", "added": append_header, "message": "Append header created from history."}
+        except HttpError as e:
+            return {"status": "error", "message": f"Failed to create append header: {e}"}
+
+    # If history header is empty or not provided, nothing to sync
+    if not history_header:
+        return {"status": "ok", "added": [], "message": "No history header provided; nothing to add."}
+
+    # Compute which history columns are missing in append (case-insensitive)
+    lower_append = [h.lower() for h in append_header]
+    missing = [h for h in history_header if h.lower() not in lower_append]
+
+    if not missing:
+        return {"status": "ok", "added": [], "message": "Append header already contains all history columns."}
+
+    # Extend append_header and pad existing append rows with None for new columns
+    new_header = append_header + missing
+    for i in range(len(append_rows)):
+        append_rows[i] = append_rows[i] + [None] * len(missing)
+
+    # Build values (header + data rows) and write back to append_range (replace)
+    out_values = [new_header] + append_rows
+    try:
+        sheet.values().update(
+            spreadsheetId=spreadsheet_id,
+            range=append_range,
+            valueInputOption='USER_ENTERED',
+            body={'values': out_values}
+        ).execute()
+    except HttpError as e:
+        return {"status": "error", "message": f"Failed to update append header: {e}"}
+
+    return {"status": "ok", "added": missing, "message": f"Added {len(missing)} columns to append header."}
+
+
 def mark_rows_deleted(spreadsheet_id: str, range_name: str,
                       creds_info: Optional[Dict] = None, creds_file: Optional[str] = None,
                       row_indices: Optional[List[int]] = None) -> Dict:
@@ -167,7 +249,7 @@ def mark_rows_deleted(spreadsheet_id: str, range_name: str,
     Soft-delete rows by setting / creating an 'is_deleted' column and marking the specified
     rows as TRUE.
 
-    - spreadsheet_id, range_name: passed to Sheets API (range_name commonly a sheet name like 'History Transactions').
+    - spreadsheet_id, range_name: passed to Sheets API (range_name commonly a sheet name like 'History Transactions' or 'Append Transactions').
     - creds_info: plain dict from parse_service_account_secret OR creds_file: path on disk.
     - row_indices: list of integers (0-based) referring to the data rows (first data row after header is index 0).
       If None or empty -> nothing is changed.
@@ -192,7 +274,7 @@ def mark_rows_deleted(spreadsheet_id: str, range_name: str,
     if not header:
         return {"status": "error", "message": "Sheet appears empty, cannot mark rows deleted."}
 
-    # Ensure 'is_deleted' column exists
+    # Ensure 'is_deleted' column exists (case-insensitive)
     if 'is_deleted' not in [h.lower() for h in header]:
         header.append('is_deleted')
         for i in range(len(data_rows)):
@@ -205,7 +287,7 @@ def mark_rows_deleted(spreadsheet_id: str, range_name: str,
     updated = 0
     for idx in row_indices:
         if 0 <= idx < len(data_rows):
-            # mark as TRUE (Google Sheets user-entered boolean)
+            # mark as TRUE string (consistent with user's string style)
             data_rows[idx][is_deleted_idx] = 'TRUE'
             updated += 1
 
@@ -227,13 +309,17 @@ def mark_rows_deleted(spreadsheet_id: str, range_name: str,
 
 
 def append_new_row(spreadsheet_id: str, range_name: str, new_row_dict: Dict[str, Any],
-                   creds_info: Optional[Dict] = None, creds_file: Optional[str] = None) -> Dict:
+                   creds_info: Optional[Dict] = None, creds_file: Optional[str] = None,
+                   history_range: Optional[str] = None) -> Dict:
     """
-    Append a new row to the sheet.
+    Append a new row to the sheet (Append sheet). Optionally synchronize headers with History sheet
+    before appending by providing history_range (sheet/tab name or A1-range for history header).
 
+    - spreadsheet_id: spreadsheet id (same spreadsheet that holds history + append or the target spreadsheet)
+    - range_name: append sheet name/range (e.g., 'Append Transactions')
     - new_row_dict: mapping of column name -> value for the new row. Keys are matched to existing header names
-      case-sensitively. Missing header columns will be left blank. If the sheet has no header, a header will be
-      created from new_row_dict.keys() (order is insertion order of dict).
+      case-insensitively. Missing header columns will be left blank.
+    - history_range: optional history sheet range/name to sync headers from prior to append.
     - Returns a dict with status and the appended row number when available.
 
     NOTE: This function will not modify non-mentioned columns; they remain blank.
@@ -241,20 +327,33 @@ def append_new_row(spreadsheet_id: str, range_name: str, new_row_dict: Dict[str,
     service = _get_write_service(creds_info, creds_file)
     sheet = service.spreadsheets()
 
+    # First, optionally ensure headers match (synchronize append header to include history columns)
+    if history_range:
+        try:
+            ensure_res = ensure_sheet_headers_match(spreadsheet_id=spreadsheet_id,
+                                                   history_range=history_range,
+                                                   append_range=range_name,
+                                                   creds_info=creds_info,
+                                                   creds_file=creds_file)
+            if ensure_res.get('status') != 'ok':
+                # proceed but warn; return error might be too strict — return error to caller
+                return {"status": "error", "message": f"Failed to ensure headers match: {ensure_res.get('message')}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error while ensuring headers: {e}"}
+
+    # Read current append sheet content to get final header
     try:
         res = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
         values = res.get("values", [])
     except HttpError as e:
-        return {"status": "error", "message": f"Failed to read sheet: {e}"}
+        return {"status": "error", "message": f"Failed to read sheet before append: {e}"}
 
     header, data_rows = _normalize_rows(values)
 
-    # If no header present, create header from new_row_dict keys
+    # If still no header (empty sheet) create header from new_row_dict keys (in insertion order)
     if not header:
         header = list(new_row_dict.keys())
-        # create initial empty data_rows (none)
         data_rows = []
-        # Write header first (so append works predictably)
         try:
             sheet.values().update(
                 spreadsheetId=spreadsheet_id,
@@ -263,38 +362,70 @@ def append_new_row(spreadsheet_id: str, range_name: str, new_row_dict: Dict[str,
                 body={'values': [header]}
             ).execute()
         except HttpError as e:
-            return {"status": "error", "message": f"Failed to write header to empty sheet: {e}"}
+            return {"status": "error", "message": f"Failed to write header to empty append sheet: {e}"}
 
-    # Build row in header order
+    # Ensure 'is_deleted' present in header; if not, append it so we always write the flag
+    if 'is_deleted' not in [h.lower() for h in header]:
+        header.append('is_deleted')
+        for i in range(len(data_rows)):
+            data_rows[i].append(None)
+
+        # write back header + padded rows to persist header change before append
+        try:
+            sheet.values().update(
+                spreadsheetId=spreadsheet_id,
+                range=range_name,
+                valueInputOption='USER_ENTERED',
+                body={'values': [header] + data_rows}
+            ).execute()
+        except HttpError as e:
+            return {"status": "error", "message": f"Failed to add is_deleted column to append sheet: {e}"}
+
+    # Build row in header order (case-insensitive matching)
     row_out = []
     for col in header:
         # match keys case-sensitively; if not present try case-insensitive fallback
         if col in new_row_dict:
             v = new_row_dict[col]
         else:
-            # case-insensitive fallback
             found = None
             for k in new_row_dict:
                 if k.lower() == col.lower():
                     found = new_row_dict[k]
                     break
             v = found if found is not None else None
+
+        # If the is_deleted column is present but user didn't provide it, default to string 'false'
+        if str(col).lower() == 'is_deleted' and (v is None):
+            v = 'false'
+
         # Convert pandas/numpy types or datetimes to strings so Sheets accepts them cleanly
         if v is None:
             row_out.append(None)
         else:
-            # if pandas Timestamp / datetime -> convert to ISO
+            # if pandas Timestamp / datetime -> convert to ISO (but prefer space-separated datetime)
             try:
                 import pandas as _pd
                 if isinstance(v, (_pd.Timestamp,)):
-                    row_out.append(str(v))
+                    # convert to "YYYY-MM-DD HH:MM:SS" if possible
+                    try:
+                        row_out.append(v.to_pydatetime().strftime("%Y-%m-%d %H:%M:%S"))
+                    except Exception:
+                        row_out.append(str(v))
                     continue
             except Exception:
                 pass
             try:
                 from datetime import datetime, date
                 if isinstance(v, (datetime, date)):
-                    row_out.append(v.isoformat())
+                    try:
+                        if isinstance(v, date) and not isinstance(v, datetime):
+                            # date only -> keep YYYY-MM-DD (but user likely provided datetime)
+                            row_out.append(v.isoformat())
+                        else:
+                            row_out.append(v.strftime("%Y-%m-%d %H:%M:%S"))
+                    except Exception:
+                        row_out.append(v.isoformat())
                     continue
             except Exception:
                 pass
@@ -315,14 +446,11 @@ def append_new_row(spreadsheet_id: str, range_name: str, new_row_dict: Dict[str,
     # Attempt to extract updatedRange / tableRange info for the appended row index (best-effort)
     try:
         updated_range = append_res.get('updates', {}).get('updatedRange')
-        # updatedRange looks like "Sheet1!A10:F10" -> we can try to parse the row number
         appended_row_number = None
         if updated_range and '!' in updated_range:
             rng = updated_range.split('!')[1]
             if ':' in rng:
-                # final cell like A10:F10 -> parse last token
                 last = rng.split(':')[-1]
-                # strip letters -> get number
                 import re
                 m = re.search(r'(\d+)', last)
                 if m:
