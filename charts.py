@@ -70,12 +70,12 @@ def render_chart(plot_df: pd.DataFrame,
     """
     Render a chart for aggregated data.
     - plot_df: aggregated daily DataFrame with Date, Total_Spent, Total_Credit
-    - converted_df: cleaned transactions DataFrame (for Top-N)
+    - converted_df: cleaned transactions DataFrame (for Top-N and drilldown)
     - chart_type: "Daily line" | "Monthly bars" | "Top categories (Top-N)"
     - series_selected: which series to include (['Total_Spent','Total_Credit'])
     - top_n: for Top-N chart
     Returns:
-      - None (no clicked-date currently). Later this can return a clicked date.
+      - None (no clicked-date currently). Client-side drilldown is handled inside the chart.
     """
     # defensively filter out deleted rows from inputs
     plot_df = _filter_out_deleted(plot_df) if plot_df is not None else pd.DataFrame()
@@ -88,7 +88,7 @@ def render_chart(plot_df: pd.DataFrame,
     chart_type = (chart_type or "").strip()
 
     if chart_type == "Daily line":
-        return _render_daily_line(plot_df, series_selected, height)
+        return _render_daily_line(plot_df, converted_df, series_selected, height)
     elif chart_type == "Monthly bars":
         return _render_monthly_bars(plot_df, series_selected, height)
     elif chart_type.startswith("Top"):
@@ -99,23 +99,36 @@ def render_chart(plot_df: pd.DataFrame,
 
 
 # ------------------ Chart implementations ------------------ #
-def _render_daily_line(plot_df: pd.DataFrame, series_selected: List[str], height: int):
+def _render_daily_line(plot_df: pd.DataFrame, converted_df: pd.DataFrame, series_selected: List[str], height: int):
+    """
+    Daily line chart with client-side drilldown:
+      - top pane: daily lines/points (click a point to select a date)
+      - bottom pane: transactions for the selected date (bar list sorted by amount)
+    Selection is client-side via Altair selection; no server roundtrip.
+    """
     df = _ensure_date_col(plot_df, "Date")
     vars_to_plot = [c for c in ['Total_Spent', 'Total_Credit'] if c in series_selected and c in df.columns]
     if not vars_to_plot:
         st.info("No series selected for plotting.")
         return None
 
+    # Prepare long format for line chart
     long = df.melt(id_vars='Date', value_vars=vars_to_plot, var_name='Type', value_name='Amount').sort_values('Date')
     long['Amount'] = pd.to_numeric(long['Amount'], errors='coerce').fillna(0.0)
 
-    # nicer color mapping (kept explicit ranges; safe since colors are small, stable palette)
+    # selection: user clicks a Date point (single selection)
+    date_sel = alt.selection_single(
+        fields=['Date'],
+        nearest=True,
+        on='click',
+        empty='none',
+        clear='dblclick'
+    )
+
+    # color scale (kept small & stable)
     color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#d62728', '#2ca02c'])
 
-    # add legend selection
-    legend_sel = alt.selection_multi(fields=['Type'], bind='legend')
-
-    chart = alt.Chart(long).mark_line(point=True).encode(
+    base = alt.Chart(long).mark_line(point=True).encode(
         x=alt.X('Date:T', title='Date'),
         y=alt.Y('Amount:Q', title='Amount', axis=alt.Axis(format=",.0f")),
         color=alt.Color('Type:N', title='Type', scale=color_scale),
@@ -124,10 +137,61 @@ def _render_daily_line(plot_df: pd.DataFrame, series_selected: List[str], height
             alt.Tooltip('Type:N', title='Type'),
             alt.Tooltip('Amount:Q', title='Amount', format=',')
         ],
-        opacity=alt.condition(legend_sel, alt.value(1.0), alt.value(0.2))
-    ).add_selection(legend_sel).interactive()
+        opacity=alt.condition(date_sel, alt.value(1.0), alt.value(0.8))
+    ).add_selection(date_sel).interactive()
 
-    st.altair_chart(chart.properties(height=height), use_container_width=True)
+    # If no converted_df provided or it lacks timestamp, just show the line chart
+    if converted_df is None or converted_df.empty:
+        st.altair_chart(base.properties(height=height), use_container_width=True)
+        return None
+
+    # Prepare transactions for detail pane
+    tx = converted_df.copy()
+    # ensure timestamp exists and normalize to date
+    if 'timestamp' in tx.columns:
+        tx['timestamp'] = pd.to_datetime(tx['timestamp'], errors='coerce')
+    elif 'date' in tx.columns:
+        tx['timestamp'] = pd.to_datetime(tx['date'], errors='coerce')
+    else:
+        tx['timestamp'] = pd.NaT
+    tx['Date'] = pd.to_datetime(tx['timestamp'], errors='coerce').dt.normalize()
+    tx['Date_str'] = tx['Date'].dt.strftime('%Y-%m-%d')
+    tx['Amount_numeric'] = pd.to_numeric(tx.get('Amount', 0), errors='coerce').fillna(0.0)
+
+    # Add a stable row id for ordering/display
+    tx = tx.reset_index().rename(columns={'index': 'row_index'})
+
+    # Lower chart: show transactions for selected date as horizontal bars sorted by Amount
+    # Use transform_filter to apply the client-side selection (filters by Date)
+    detail = alt.Chart(tx).transform_filter(
+        date_sel
+    ).transform_window(
+        sort=[alt.SortField('Amount_numeric', order='descending')],
+        rank='rank'
+    ).transform_filter(
+        alt.datum['Date'] != None
+    ).mark_bar().encode(
+        x=alt.X('Amount_numeric:Q', title='Amount', axis=alt.Axis(format=",.0f")),
+        y=alt.Y('rank:O', title=None, axis=None, sort='-x'),
+        color=alt.Color('Type:N', scale=color_scale, legend=None),
+        tooltip=[
+            alt.Tooltip('Date_str:N', title='Date'),
+            alt.Tooltip('Bank:N', title='Bank'),
+            alt.Tooltip('Type:N', title='Type'),
+            alt.Tooltip('Amount_numeric:Q', title='Amount', format=','),
+            alt.Tooltip('Message:N', title='Message'),
+            alt.Tooltip('_source_sheet:N', title='Source'),
+            alt.Tooltip('_sheet_row_idx:N', title='Sheet row idx')
+        ]
+    ).properties(height=max(120, int(height * 0.35)))
+
+    # Compose vconcat: top line chart + bottom details (bottom will be empty until a date is clicked)
+    v = alt.vconcat(
+        base.properties(height=max(200, int(height * 0.6))),
+        detail
+    ).resolve_scale(color='independent')
+
+    st.altair_chart(v, use_container_width=True)
     return None
 
 
