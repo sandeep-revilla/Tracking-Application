@@ -161,18 +161,20 @@ def _render_daily_line(plot_df: pd.DataFrame, converted_df: pd.DataFrame, series
     # Add a stable row id for ordering/display
     tx = tx.reset_index().rename(columns={'index': 'row_index'})
 
+    # Compute per-date rank in pandas so we avoid transform_window schema issues
+    try:
+        tx['rank'] = tx.groupby('Date')['Amount_numeric'].rank(method='first', ascending=False)
+        # make ordinal for Altair
+        tx['rank'] = tx['rank'].fillna(999999).astype(int)
+    except Exception:
+        tx['rank'] = tx.reset_index().index.astype(int)
+
     # Lower chart: show transactions for selected date as horizontal bars sorted by Amount
-    # Use transform_filter to apply the client-side selection (filters by Date)
     detail = alt.Chart(tx).transform_filter(
         date_sel
-    ).transform_window(
-        sort=[alt.SortField('Amount_numeric', order='descending')],
-        rank='rank'
-    ).transform_filter(
-        alt.datum['Date'] != None
     ).mark_bar().encode(
         x=alt.X('Amount_numeric:Q', title='Amount', axis=alt.Axis(format=",.0f")),
-        y=alt.Y('rank:O', title=None, axis=None, sort='-x'),
+        y=alt.Y('rank:O', title=None, axis=None),
         color=alt.Color('Type:N', scale=color_scale, legend=None),
         tooltip=[
             alt.Tooltip('Date_str:N', title='Date'),
