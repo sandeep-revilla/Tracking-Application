@@ -1,5 +1,6 @@
 # transform.py  -- pure data transformation utilities
 import pandas as pd
+from typing import Optional
 
 def _is_date_like_column(col_name: str) -> bool:
     lname = str(col_name).lower()
@@ -11,67 +12,127 @@ def _is_amount_like_column(col_name: str) -> bool:
     num_keywords = ['amount', 'amt', 'value', 'total', 'balance', 'credit', 'debit', 'spent']
     return any(k in lname for k in num_keywords)
 
+def _detect_is_deleted_mask(df: pd.DataFrame) -> Optional[pd.Series]:
+    """
+    If an 'is_deleted' column (case-insensitive) exists in df, return a boolean mask
+    where True indicates the row is deleted. Accepts boolean, numeric, and common string
+    values ('true','t','1','yes'). Returns None if no such column exists.
+    """
+    # find column name case-insensitively
+    isdel_col = next((c for c in df.columns if str(c).lower() == 'is_deleted'), None)
+    if isdel_col is None:
+        return None
+
+    s = df[isdel_col]
+    # Build mask with robust conversions
+    try:
+        # If it's already boolean-ish
+        if pd.api.types.is_bool_dtype(s):
+            return s.fillna(False).astype(bool)
+        # If numeric (1/0)
+        if pd.api.types.is_numeric_dtype(s):
+            return s.fillna(0).astype(int) == 1
+        # otherwise coerce to string and check common true tokens
+        lowered = s.astype(str).str.strip().str.lower().fillna('')
+        mask = lowered.isin(['true', 't', '1', 'yes', 'y'])
+        return mask
+    except Exception:
+        # Fallback: try string approach
+        try:
+            lowered = s.astype(str).str.strip().str.lower().fillna('')
+            return lowered.isin(['true', 't', '1', 'yes', 'y'])
+        except Exception:
+            return None
+
 def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize columns:
+      - remove rows marked deleted via an 'is_deleted' column (case-insensitive)
       - detect and coerce date/time columns -> timestamp
       - detect and coerce numeric columns -> Amount (float)
       - create 'date' column (date part of timestamp)
       - infer Type ('debit'/'credit') if missing based on sign of Amount
-    Returns a cleaned DataFrame (does not mutate input).
-    Rows where Type is unknown are dropped.
+    Returns a cleaned DataFrame (does not mutate input). Preserves any extra columns
+    (like _sheet_row_idx) so they survive transformation.
+    Rows where Type is unknown are dropped (same behavior as before).
     """
     if df is None:
         return pd.DataFrame()
     if df.empty:
         return pd.DataFrame()
 
+    # Work on a copy to avoid mutating caller's DataFrame
     df = df.copy()
-    # strip column names
+
+    # Preserve original column names (strip only whitespace)
     df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
+
+    # 0) Filter out soft-deleted rows early (if present)
+    try:
+        isdel_mask = _detect_is_deleted_mask(df)
+        if isdel_mask is not None:
+            # keep rows that are NOT deleted
+            df = df.loc[~isdel_mask].copy().reset_index(drop=True)
+    except Exception:
+        # if detection fails, continue without filtering
+        pass
 
     # 1) Detect & coerce date-like columns to datetime (prefer the first reasonable column)
     primary_dt_col = None
     for col in df.columns:
-        if _is_date_like_column(col):
-            parsed = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
-            if parsed.notna().sum() > 0:
-                df[col] = parsed
-                primary_dt_col = col
-                break
-    # fallback: try to find any column that can be parsed as datetime
-    if primary_dt_col is None:
-        for col in df.columns:
-            if df[col].dtype == object:
+        try:
+            if _is_date_like_column(col):
                 parsed = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
-                if parsed.notna().sum() >= 3:
+                if parsed.notna().sum() > 0:
                     df[col] = parsed
                     primary_dt_col = col
                     break
+        except Exception:
+            continue
+
+    # fallback: try to find any column that can be parsed as datetime
+    if primary_dt_col is None:
+        for col in df.columns:
+            try:
+                if df[col].dtype == object:
+                    parsed = pd.to_datetime(df[col], errors='coerce', dayfirst=False)
+                    if parsed.notna().sum() >= 3:
+                        df[col] = parsed
+                        primary_dt_col = col
+                        break
+            except Exception:
+                continue
 
     # 2) Detect amount-like columns and coerce to numeric (choose preferred)
     amount_cols = []
     for col in df.columns:
-        if _is_amount_like_column(col):
-            coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
-            df[col] = coerced
-            amount_cols.append(col)
+        try:
+            if _is_amount_like_column(col):
+                coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
+                df[col] = coerced
+                amount_cols.append(col)
+        except Exception:
+            continue
 
     # Heuristic: if no obvious amount column found, try to coerce any object column that looks numeric
     if not amount_cols:
         for col in df.columns:
-            if df[col].dtype == object:
-                sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
-                parsed = pd.to_numeric(sample, errors='coerce')
-                if parsed.notna().sum() >= 3:
-                    coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
-                    df[col] = coerced
-                    amount_cols.append(col)
-                    break
+            try:
+                if df[col].dtype == object:
+                    sample = df[col].astype(str).head(20).str.replace(r'[^\d\.\-]', '', regex=True)
+                    parsed = pd.to_numeric(sample, errors='coerce')
+                    if parsed.notna().sum() >= 3:
+                        coerced = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
+                        df[col] = coerced
+                        amount_cols.append(col)
+                        break
+            except Exception:
+                continue
 
-    # Choose preferred amount column name
+    # Choose preferred amount column name (case-insensitive matching)
     preferred = None
-    for candidate in ['amount','total_spent','totalspent','total','txn amount','value','spent','amt']:
+    candidates = ['amount','total_spent','totalspent','total','txn amount','value','spent','amt']
+    for candidate in candidates:
         for col in df.columns:
             if str(col).lower() == candidate:
                 preferred = col
@@ -82,35 +143,49 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
         preferred = amount_cols[0]
 
     if preferred:
+        # create canonical 'Amount' column (unless it already exists and is numeric)
         if preferred != 'Amount':
             if 'Amount' not in df.columns:
-                df.rename(columns={preferred: 'Amount'}, inplace=True)
-    # Ensure Amount column exists
-    if 'Amount' in df.columns:
-        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').astype('float64')
+                try:
+                    df.rename(columns={preferred: 'Amount'}, inplace=True)
+                except Exception:
+                    # fallback: create Amount from preferred
+                    df['Amount'] = pd.to_numeric(df[preferred], errors='coerce')
+        else:
+            # Ensure numeric
+            df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
     else:
-        # create Amount with NA if nothing found
-        df['Amount'] = pd.NA
+        # Ensure Amount exists (may be NA)
+        if 'Amount' not in df.columns:
+            df['Amount'] = pd.NA
+        else:
+            df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
 
     # 3) Create canonical timestamp and date columns
-    if primary_dt_col:
-        df['timestamp'] = pd.to_datetime(df[primary_dt_col], errors='coerce')
-    elif 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    elif 'date' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['date'], errors='coerce')
-    else:
-        # Last resort: no date-like column found, leave NaT
+    try:
+        if primary_dt_col:
+            df['timestamp'] = pd.to_datetime(df[primary_dt_col], errors='coerce')
+        elif 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+        elif 'date' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['date'], errors='coerce')
+        else:
+            df['timestamp'] = pd.NaT
+    except Exception:
         df['timestamp'] = pd.NaT
 
-    # date (date part)
+    # date (date part) - keep as date objects (not datetime) to ease grouping
     try:
-        df['date'] = df['timestamp'].dt.date
+        df['date'] = pd.to_datetime(df['timestamp'], errors='coerce').dt.date
     except Exception:
         df['date'] = pd.NA
 
-    # 4) Infer Type if missing: positive Amount -> 'debit' (spent), negative -> 'credit'
-    if 'Type' not in df.columns:
+    # 4) Infer or normalize Type (case-insensitive detection of existing 'type' column)
+    # Find existing type column name (case-insensitive)
+    existing_type_col = next((c for c in df.columns if str(c).lower() == 'type'), None)
+
+    if existing_type_col is None:
+        # create 'Type' by inference from Amount sign
         try:
             df['Type'] = pd.NA
             mask_pos = df['Amount'].notna() & (df['Amount'] > 0)
@@ -118,31 +193,29 @@ def convert_columns_and_derives(df: pd.DataFrame) -> pd.DataFrame:
             df.loc[mask_pos, 'Type'] = 'debit'
             df.loc[mask_neg, 'Type'] = 'credit'
         except Exception:
-            # leave Type as NA if something goes wrong
             df['Type'] = pd.NA
     else:
-        # normalize existing Type values
+        # Normalize existing values into canonical 'Type' column
         try:
-            df['Type'] = df['Type'].astype(str).str.lower().str.strip()
+            df['Type'] = df[existing_type_col].astype(str).str.lower().str.strip()
         except Exception:
-            pass
+            df['Type'] = df[existing_type_col].astype(str)
 
     # Normalize Type column to canonical lower-case strings and mark empties as 'unknown'
     try:
         df['Type'] = df['Type'].astype(str).str.lower().str.strip()
         df['Type'] = df['Type'].replace({'nan': 'unknown', 'none': 'unknown', '': 'unknown', 'na': 'unknown', 'null': 'unknown'})
     except Exception:
-        # fallback: if normalization fails, set everything to unknown to be safe
         df['Type'] = 'unknown'
 
-    # DROP rows where Type is unknown (user requested)
+    # DROP rows where Type is unknown (preserve other columns)
     try:
-        df = df[df['Type'] != 'unknown'].copy()
+        df = df[df['Type'] != 'unknown'].copy().reset_index(drop=True)
     except Exception:
         # if something unexpected happens, keep dataframe as-is
         pass
 
-    # final reorder: put timestamp and date at front
+    # final reorder: put timestamp and date at front but preserve other columns (including _sheet_row_idx, is_deleted etc.)
     cols = list(df.columns)
     final = []
     if 'timestamp' in cols:
@@ -181,9 +254,12 @@ def compute_daily_totals(df: pd.DataFrame) -> pd.DataFrame:
         # try to find any datetime-like column
         found = None
         for c in w.columns:
-            if pd.api.types.is_datetime64_any_dtype(w[c]) and w[c].notna().any():
-                found = c
-                break
+            try:
+                if pd.api.types.is_datetime64_any_dtype(w[c]) and w[c].notna().any():
+                    found = c
+                    break
+            except Exception:
+                continue
         if found:
             grp = pd.to_datetime(w[found]).dt.normalize()
         else:
