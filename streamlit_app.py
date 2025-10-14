@@ -351,7 +351,7 @@ if start_sel and end_sel:
     ]
 
 # Desired columns (case-insensitive)
-_desired = ['timestamp', 'bank', 'type', 'amount', 'suspicious']
+_desired = ['timestamp', 'bank', 'type', 'amount', 'suspicious', 'message']
 
 # Map actual columns in the dataframe (preserve original casing)
 col_map = {c.lower(): c for c in rows_df.columns}
