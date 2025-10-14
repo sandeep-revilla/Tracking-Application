@@ -367,7 +367,7 @@ if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map
 
 # If we couldn't find any of the desired columns, show the full table as a fallback
 if not display_cols:
-    st.warning("None of the preferred columns (timestamp, Bank, Type, Amount, Suspicious) were found — showing full table.")
+    st.warning("None of the preferred columns (timestamp, Bank, Type, Amount, Suspicious, message) were found — showing full table.")
     st.dataframe(rows_df.reset_index(drop=True), use_container_width=True, height=400)
     csv_bytes = rows_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
@@ -401,11 +401,13 @@ else:
             pretty_rename[c] = 'Amount'
         elif lc == 'suspicious':
             pretty_rename[c] = 'Suspicious'
+        elif lc == 'message':
+            pretty_rename[c] = 'Message'
     if pretty_rename:
         display_df = display_df.rename(columns=pretty_rename)
 
     # Ensure order: Timestamp, Bank, Type, Amount, Suspicious (include whichever exist)
-    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Suspicious'] if c in display_df.columns]
+    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Suspicious', 'Message'] if c in display_df.columns]
     display_df = display_df[final_order]
 
     # Show table and download only these columns (use full width + fixed height to avoid excessive dragging)
