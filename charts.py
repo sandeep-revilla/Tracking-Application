@@ -14,6 +14,53 @@ def _ensure_date_col(df: pd.DataFrame, col: str = "Date") -> pd.DataFrame:
     return df
 
 
+def _is_deleted_mask(df: pd.DataFrame) -> Optional[pd.Series]:
+    """
+    Detect an 'is_deleted' column (case-insensitive) and return a boolean mask (True for deleted rows).
+    Returns None if no is_deleted column is present.
+    Accepts boolean, numeric (1/0) and string values like 'true','t','1','yes'.
+    """
+    if df is None or df.empty:
+        return None
+    isdel_col = next((c for c in df.columns if str(c).lower() == 'is_deleted'), None)
+    if isdel_col is None:
+        return None
+    s = df[isdel_col]
+    try:
+        if pd.api.types.is_bool_dtype(s):
+            return s.fillna(False).astype(bool)
+        if pd.api.types.is_numeric_dtype(s):
+            return s.fillna(0).astype(int) == 1
+        lowered = s.astype(str).str.strip().str.lower().fillna('')
+        return lowered.isin(['true', 't', '1', 'yes', 'y'])
+    except Exception:
+        try:
+            lowered = s.astype(str).str.strip().str.lower().fillna('')
+            return lowered.isin(['true', 't', '1', 'yes', 'y'])
+        except Exception:
+            return None
+
+
+def _filter_out_deleted(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df excluding rows marked deleted (if is_deleted column exists).
+    Otherwise returns df.copy().
+    """
+    if df is None:
+        return pd.DataFrame()
+    mask = _is_deleted_mask(df)
+    if mask is None:
+        return df.copy()
+    try:
+        return df.loc[~mask].copy().reset_index(drop=True)
+    except Exception:
+        # defensive fallback
+        try:
+            return df.loc[~mask.fillna(False)].copy().reset_index(drop=True)
+        except Exception:
+            return df.copy()
+
+
 def render_chart(plot_df: pd.DataFrame,
                  converted_df: pd.DataFrame,
                  chart_type: str,
@@ -30,6 +77,10 @@ def render_chart(plot_df: pd.DataFrame,
     Returns:
       - None (no clicked-date currently). Later this can return a clicked date.
     """
+    # defensively filter out deleted rows from inputs
+    plot_df = _filter_out_deleted(plot_df) if plot_df is not None else pd.DataFrame()
+    converted_df = _filter_out_deleted(converted_df) if converted_df is not None else pd.DataFrame()
+
     if plot_df is None or plot_df.empty:
         st.info("No aggregated data available for charting.")
         return None
@@ -58,7 +109,7 @@ def _render_daily_line(plot_df: pd.DataFrame, series_selected: List[str], height
     long = df.melt(id_vars='Date', value_vars=vars_to_plot, var_name='Type', value_name='Amount').sort_values('Date')
     long['Amount'] = pd.to_numeric(long['Amount'], errors='coerce').fillna(0.0)
 
-    # nicer color mapping
+    # nicer color mapping (kept explicit ranges; safe since colors are small, stable palette)
     color_scale = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=['#d62728', '#2ca02c'])
 
     # add legend selection
