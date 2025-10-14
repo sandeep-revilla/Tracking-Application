@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import importlib
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dt_time
 
 st.set_page_config(page_title="Daily Spend", layout="wide")
 st.title("💳 Daily Spending")
@@ -16,7 +16,7 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# optional I/O helper
+# optional I/O helper (must be present for Google Sheets features)
 try:
     import io_helpers as io_mod
 except Exception:
@@ -38,7 +38,9 @@ with st.sidebar:
     )
 
     SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk")
-    RANGE = st.text_input("Range or Sheet Name", value="History Transactions")
+    RANGE = st.text_input("History sheet name or range", value="History Transactions")
+    # New: append sheet name/range
+    APPEND_RANGE = st.text_input("Append sheet name or range", value="Append Transactions")
     CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
 
     st.markdown("---")
@@ -54,6 +56,38 @@ with st.sidebar:
     if st.button("Refresh"):
         st.experimental_rerun()
 
+# ------------------ Helpers ------------------
+def _get_creds_info():
+    """Return plain creds dict or None (safe to pass into io_helpers functions)."""
+    if io_mod is None:
+        return None
+    try:
+        if hasattr(st, "secrets") and st.secrets and "gcp_service_account" in st.secrets:
+            raw = st.secrets["gcp_service_account"]
+            return io_mod.parse_service_account_secret(raw)
+    except Exception:
+        return None
+    return None
+
+def _read_sheet_with_index(spreadsheet_id: str, range_name: str, source_name: str, creds_info, creds_file):
+    """
+    Read a sheet, return DataFrame with added columns:
+      - _sheet_row_idx (0-based index of data rows after header)
+      - _source_sheet (source_name string)
+    If read fails or empty, returns empty DataFrame.
+    """
+    try:
+        df = io_mod.read_google_sheet(spreadsheet_id, range_name, creds_info=creds_info, creds_file=creds_file)
+    except Exception:
+        return pd.DataFrame()
+    if df is None:
+        return pd.DataFrame()
+    df = df.reset_index(drop=True)
+    if not df.empty:
+        df['_sheet_row_idx'] = df.index.astype(int)
+    df['_source_sheet'] = source_name
+    return df
+
 # ------------------ Data loaders (safe wrappers) ------------------
 def load_from_upload(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
@@ -67,31 +101,15 @@ def load_from_upload(uploaded_file) -> pd.DataFrame:
         st.error(f"Failed to parse upload: {e}")
         return pd.DataFrame()
 
-
 def load_from_sheet_safe(sheet_id: str, range_name: str, creds_file: str) -> pd.DataFrame:
     """
-    Safe wrapper that:
-      - reads st.secrets["gcp_service_account"] (if present),
-      - parses it into a plain dict (using io_helpers.parse_service_account_secret),
-      - passes that plain dict to io_helpers.read_google_sheet (a cached function).
-    This avoids passing the Streamlit runtime 'st.secrets' object into a cached function.
+    Backward-compatible wrapper to read single sheet (keeps prior behavior).
     """
     if io_mod is None:
         st.error("io_helpers.py not available. Add io_helpers.py to the project to use Google Sheets.")
         return pd.DataFrame()
 
-    creds_info = None
-    # Parse st.secrets into a plain dict if present
-    try:
-        if hasattr(st, "secrets") and st.secrets and "gcp_service_account" in st.secrets:
-            raw = st.secrets["gcp_service_account"]
-            # parse_service_account_secret returns a plain dict
-            creds_info = io_mod.parse_service_account_secret(raw)
-    except Exception as e:
-        st.warning(f"Failed to parse st.secrets['gcp_service_account']: {e}")
-        creds_info = None
-
-    # If creds_info is None, but a local creds_file exists, io_helpers will use that.
+    creds_info = _get_creds_info()
     try:
         return io_mod.read_google_sheet(sheet_id, range_name, creds_info=creds_info, creds_file=creds_file)
     except Exception as e:
@@ -113,24 +131,15 @@ def sample_data():
         rows.append({"timestamp": pd.to_datetime(d), "description": f"Sample txn {i+1}", "Amount": amt, "Type": t})
     return pd.DataFrame(rows)
 
-
 # ------------------ Helper: bank detection & filtering ------------------
 def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
-    """
-    Ensure df has a 'Bank' column. If missing (or overwrite=True), try to detect bank name
-    from common text fields: 'bank', 'account', 'description', 'message', 'narration', 'beneficiary', 'merchant'.
-    Returns a new DataFrame with 'Bank' column (string), unknowns marked 'Unknown'.
-    """
     df = df.copy()
     if 'Bank' in df.columns and not overwrite:
-        # normalize existing Bank column values to strings and fillna
         df['Bank'] = df['Bank'].astype(str).where(df['Bank'].notna(), None)
         df['Bank'] = df['Bank'].fillna('Unknown')
         return df
 
-    # candidate text columns to scan
     cand_cols = ['bank', 'account', 'account_name', 'description', 'message', 'narration', 'merchant', 'beneficiary', 'note']
-    # build a combined lowercased text for each row
     def _row_text(row):
         parts = []
         for c in cand_cols:
@@ -138,7 +147,6 @@ def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
                 parts.append(str(row[c]))
         return " ".join(parts).lower()
 
-    # mapping patterns -> normalized bank name (extend as needed)
     bank_map = {
         'hdfc': 'HDFC Bank',
         'hdfc bank': 'HDFC Bank',
@@ -148,14 +156,11 @@ def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
         'indian bank': 'Indian Bank',
         'indianbank': 'Indian Bank',
         'indian bank ltd': 'Indian Bank',
-        # add more heuristics if needed
     }
 
-    # compute combined text column (vectorized using apply)
     try:
         combined = df.apply(_row_text, axis=1)
     except Exception:
-        # fallback: if apply fails (weird dtypes), create empty series
         combined = pd.Series([''] * len(df), index=df.index)
 
     detected = []
@@ -171,43 +176,55 @@ def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
     df['Bank'] = df['Bank'].fillna('Unknown')
     return df
 
-
 # ------------------ Load raw data according to selection ----------------
 uploaded = None
 if data_source == "Upload CSV/XLSX":
     uploaded = st.file_uploader("Upload CSV or XLSX (HDFC / Indian Bank / IFTTT sheet)", type=["csv", "xlsx"])
 
-# We'll maintain two variables when using Google Sheet:
-# - sheet_full_df: full dataframe as read from the sheet (including deleted rows and original sheet row indices)
-# - df_raw: the visible dataframe (deleted rows removed) which flows into transform
-sheet_full_df = None
+sheet_full_df = pd.DataFrame()
+df_raw = pd.DataFrame()
 
 if data_source == "Google Sheet (optional)":
     if not SHEET_ID:
         st.sidebar.info("Enter Google Sheet ID to enable sheet loading.")
         df_raw = pd.DataFrame()
     else:
-        with st.spinner("Fetching Google Sheet..."):
-            # raw sheet (may include is_deleted column). We will keep original indices to map back to sheet rows.
-            sheet_full_df = load_from_sheet_safe(SHEET_ID, RANGE, CREDS_FILE)
-            if sheet_full_df is None:
-                sheet_full_df = pd.DataFrame()
-            # normalize to DataFrame and ensure index -> use as sheet data-row index
-            sheet_full_df = sheet_full_df.reset_index(drop=True)
-            # attach explicit sheet-row index column used by mark_rows_deleted (0-based relative to data rows)
-            if not sheet_full_df.empty:
-                sheet_full_df['_sheet_row_idx'] = sheet_full_df.index.astype(int)
+        with st.spinner("Fetching Google Sheets (History + Append)..."):
+            if io_mod is None:
+                st.error("io_helpers.py is required to read Google Sheets. Add io_helpers.py to the project.")
+                st.stop()
+            creds_info = _get_creds_info()
 
-            # If there's an is_deleted column, filter out deleted rows for the UI/dataflow,
-            # but keep sheet_full_df intact so we can map selections back to the original sheet indices.
-            if 'is_deleted' in sheet_full_df.columns:
+            # Read history sheet
+            history_df = _read_sheet_with_index(SHEET_ID, RANGE, "history", creds_info, CREDS_FILE)
+            # Read append sheet (may be missing / empty)
+            append_df = _read_sheet_with_index(SHEET_ID, APPEND_RANGE, "append", creds_info, CREDS_FILE)
+
+            # Keep combined sheet_full_df for mapping back to sheet row indices
+            if history_df is None:
+                history_df = pd.DataFrame()
+            if append_df is None:
+                append_df = pd.DataFrame()
+            # ensure _sheet_row_idx exists numeric when empty
+            if history_df.empty and append_df.empty:
+                sheet_full_df = pd.DataFrame()
+            else:
+                sheet_full_df = pd.concat([history_df, append_df], ignore_index=True, sort=False)
+                # ensure _sheet_row_idx present and int where available; rows from different sheets may have overlapping idx
+                # Keep per-row _source_sheet telling which sheet it came from; mark missing _sheet_row_idx as NaN
+                if '_sheet_row_idx' not in sheet_full_df.columns:
+                    sheet_full_df['_sheet_row_idx'] = pd.NA
+
+            # Now create df_raw by removing soft-deleted rows (so UI/transform operate on visible rows only)
+            if not sheet_full_df.empty and 'is_deleted' in sheet_full_df.columns:
                 try:
                     deleted_mask = sheet_full_df['is_deleted'].astype(str).str.lower().isin(['true', 't', '1', 'yes'])
                 except Exception:
                     deleted_mask = sheet_full_df['is_deleted'].astype(str).str.lower().isin(['true', 't', '1', 'yes'])
-                df_raw = sheet_full_df[~deleted_mask].copy().reset_index(drop=True)
+                df_raw = sheet_full_df.loc[~deleted_mask].copy().reset_index(drop=True)
             else:
-                df_raw = sheet_full_df.copy()
+                df_raw = sheet_full_df.copy().reset_index(drop=True)
+
 elif data_source == "Upload CSV/XLSX":
     df_raw = load_from_upload(uploaded)
     if df_raw is None or df_raw.empty:
@@ -222,7 +239,7 @@ if df_raw is None or df_raw.empty:
 
 # ------------------ Transform using transform.py ------------------
 with st.spinner("Cleaning and deriving columns..."):
-    # Note: if transform preserves unknown columns (like '_sheet_row_idx'), that helps mapping.
+    # transform is expected to preserve extra cols like '_sheet_row_idx' and '_source_sheet'
     converted_df = transform.convert_columns_and_derives(df_raw)
 
 # ensure bank column exists (detect heuristically if needed)
@@ -232,16 +249,14 @@ converted_df = add_bank_column(converted_df, overwrite=False)
 with st.sidebar:
     st.markdown("---")
     st.write("Filter by Bank")
-    # detect unique banks and sort; prefer to show HDFC/Indian selected if present
     banks_detected = sorted([b for b in converted_df['Bank'].unique() if pd.notna(b)])
-    # default selection logic: if HDFC/Indian present select them, else select all
     defaults = []
     if 'HDFC Bank' in banks_detected:
         defaults.append('HDFC Bank')
     if 'Indian Bank' in banks_detected:
         defaults.append('Indian Bank')
     if not defaults:
-        defaults = banks_detected  # select all by default if HDFC/Indian not found
+        defaults = banks_detected
     sel_banks = st.multiselect("Banks", options=banks_detected, default=defaults)
 
 # filter converted_df according to selection
@@ -250,11 +265,11 @@ if sel_banks:
 else:
     converted_df_filtered = converted_df.copy()
 
-# ------------------ Compute daily totals (from filtered transactions) ----------------
+# ------------------ Compute daily totals (from filtered transactions) ------------------
 with st.spinner("Computing daily totals..."):
     merged = transform.compute_daily_totals(converted_df_filtered)
 
-# ------------------ Sidebar: Date filters (moved above the table so table can obey selection) ----------------
+# ------------------ Sidebar: Date filters (moved above the table so table can obey selection) ------------------
 with st.sidebar:
     st.header("Filters")
     if not merged.empty:
@@ -303,10 +318,8 @@ with st.sidebar:
         selected_date = st.date_input("Pick date", value=datetime.utcnow().date(), min_value=min_date, max_value=max_date)
         selected_date_range_for_totals = (selected_date, selected_date)
     else:
-        # date_input with tuple returns (start, end)
         default_range = (min_date, max_date)
         dr = st.date_input("Pick start & end", value=default_range, min_value=min_date, max_value=max_date)
-        # dr might be a single date if user selects only one; ensure a tuple
         if isinstance(dr, (tuple, list)):
             selected_date_range_for_totals = (dr[0], dr[1])
         else:
@@ -332,7 +345,6 @@ st.subheader("Daily Spend and Credit")
 if plot_df.empty:
     st.info("No data for the selected filters.")
 else:
-    # delegate to charts.py if present
     if charts_mod is not None:
         series_selected = []
         if show_debit: series_selected.append('Total_Spent')
@@ -347,7 +359,7 @@ else:
     else:
         st.info("charts.py not available; install or add charts.py for visualizations.")
 
-# ------------------ Rows view & download (show only selected columns) ----------------
+# ------------------ Rows view & download (show only selected columns) ------------------
 st.subheader("Rows (matching selection)")
 
 # start from filtered transactions so rows match the chart & bank selection
@@ -435,128 +447,74 @@ else:
     final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Suspicious', 'Message'] if c in display_df.columns]
     display_df = display_df[final_order]
 
-    # ------------------ NEW: Build selectable labels mapping to sheet indices ------------------
-    # We'll enable selection only when data_source is Google Sheet and io_helpers supports write
-    selectable = False
-    selectable_labels = []
-    selectable_values = []
-    if data_source == "Google Sheet (optional)" and io_mod is not None and sheet_full_df is not None and not sheet_full_df.empty:
-        # We need to map the rows we are showing (display_df) back to sheet_full_df to find sheet row indices.
-        # Assumption: transform preserved some identifying fields that allow aligning (best-effort).
-        # Simple approach: try to preserve _sheet_row_idx carried forward through transform; if present in converted_df_filtered,
-        # use that. Otherwise, try to align by timestamp+amount+message heuristics (fallback).
-        sheet_idx_col = None
-        if '_sheet_row_idx' in converted_df_filtered.columns:
-            # If the filtered/converted df still has the sheet index, use it directly.
-            sheet_idx_col = '_sheet_row_idx'
-        elif '_sheet_row_idx' in display_df.columns:
-            sheet_idx_col = '_sheet_row_idx'
-
-        # Build a view of rows with sheet index where possible
-        # Try to merge from converted_df_filtered to display_df on timestamp & amount & message for mapping
-        mapping_df = None
-        if sheet_idx_col is not None and sheet_idx_col in converted_df_filtered.columns:
-            mapping_df = converted_df_filtered[[sheet_idx_col]].copy()
-            # mapping_df index should align to rows_df index — create column to merge on positional index
-            mapping_df['__pos'] = mapping_df.index
-            temp_display = display_df.reset_index().rename(columns={'index': '__pos'})
-            merged_map = temp_display.merge(mapping_df, on='__pos', how='left')
-            # collect labels and values
-            for i, row in merged_map.iterrows():
-                label_ts = row.get('Timestamp', '')
-                label_msg = row.get('Message', '') if 'Message' in row else ''
-                label_amt = row.get('Amount', '') if 'Amount' in row else ''
-                label = f"{row.name+1} | {label_ts} | {label_amt} | {label_msg}"
-                sheet_idx = row.get(sheet_idx_col)
-                if pd.isna(sheet_idx):
-                    # skip rows we cannot map
-                    continue
-                selectable_labels.append(label)
-                selectable_values.append(int(sheet_idx))
-        else:
-            # fallback: attempt heuristic mapping using timestamp + amount + message
-            # Build keys on both dataframes and try to match
-            def _key_from_row(r):
-                parts = []
-                if 'Timestamp' in r and pd.notna(r['Timestamp']):
-                    parts.append(str(r['Timestamp']).split(' ')[0])
-                if 'Amount' in r and pd.notna(r['Amount']):
-                    parts.append(str(r['Amount']))
-                if 'Message' in r and pd.notna(r['Message']):
-                    parts.append(str(r['Message'])[:40])
-                return " | ".join(parts)
-
-            # build mapping from keys to sheet idx (may be many->1)
-            sheet_map = {}
-            if sheet_full_df is not None and not sheet_full_df.empty:
-                sf = sheet_full_df.copy()
-                # try to normalize timestamp & amount & message column names
-                sf_cols = {c.lower(): c for c in sf.columns}
-                ts_col = sf_cols.get('timestamp') or sf_cols.get('date') or None
-                amt_col = sf_cols.get('amount')
-                msg_col = sf_cols.get('message') or sf_cols.get('description') or sf_cols.get('note') or None
-                if ts_col is not None:
-                    sf['__ts_key'] = pd.to_datetime(sf[ts_col], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
-                else:
-                    sf['__ts_key'] = ''
-                if amt_col is not None:
-                    sf['__amt_key'] = sf[amt_col].astype(str).fillna('')
-                else:
-                    sf['__amt_key'] = ''
-                if msg_col is not None:
-                    sf['__msg_key'] = sf[msg_col].astype(str).fillna('').str.slice(0,40)
-                else:
-                    sf['__msg_key'] = ''
-                for _, r in sf.iterrows():
-                    key = f"{r['__ts_key']} | {r['__amt_key']} | {r['__msg_key']}"
-                    sheet_map.setdefault(key, []).append(int(r['_sheet_row_idx']) if '_sheet_row_idx' in r else None)
-
-            # now iterate display_df rows to produce labels and choose the first mapped sheet idx if any
-            disp = display_df.reset_index(drop=True)
-            for i, r in disp.iterrows():
-                parts = []
-                if 'Timestamp' in r and pd.notna(r['Timestamp']):
-                    parts.append(str(r['Timestamp']).split(' ')[0])
-                else:
-                    parts.append('')
-                if 'Amount' in r and pd.notna(r['Amount']):
-                    parts.append(str(r['Amount']))
-                else:
-                    parts.append('')
-                if 'Message' in r and pd.notna(r['Message']):
-                    parts.append(str(r['Message'])[:40])
-                else:
-                    parts.append('')
-                key = " | ".join(parts)
-                candidates = sheet_map.get(key, [])
-                if candidates:
-                    selectable_labels.append(f"{i+1} | {parts[0]} | {parts[1]} | {parts[2]}")
-                    selectable_values.append(candidates[0])
-        if selectable_values:
-            selectable = True
-
     # Show table and download only these columns (use full width + fixed height to avoid excessive dragging)
     st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=420)
     csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
+    # ------------------ Build selectable mapping (label -> (sheet_range, sheet_row_idx)) ------------------
+    selectable = False
+    selectable_labels = []
+    selectable_label_to_target = {}  # label -> (range_name, idx)
+    if data_source == "Google Sheet (optional)" and io_mod is not None and not sheet_full_df.empty:
+        # Use converted_df_filtered (which should preserve _sheet_row_idx and _source_sheet)
+        map_df = converted_df_filtered.copy()
+        # Ensure mapping columns exist
+        if '_sheet_row_idx' in map_df.columns and '_source_sheet' in map_df.columns:
+            # filter same date-range as display to avoid mismatches
+            try:
+                map_df['timestamp'] = pd.to_datetime(map_df['timestamp'], errors='coerce')
+            except Exception:
+                pass
+            # Keep only rows in the displayed date window
+            if start_sel and end_sel:
+                map_df = map_df[
+                    (map_df['timestamp'].dt.date >= start_sel) &
+                    (map_df['timestamp'].dt.date <= end_sel)
+                ]
+            # Build labels
+            for i, r in map_df.iterrows():
+                ts = ''
+                if 'timestamp' in r and pd.notna(r['timestamp']):
+                    try:
+                        ts = pd.to_datetime(r['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        ts = str(r['timestamp'])
+                amt = r.get('Amount', '')
+                msg = r.get('Message', '') if 'Message' in r else (r.get('message', '') if 'message' in r else '')
+                src = r.get('_source_sheet', 'history')
+                idx = r.get('_sheet_row_idx')
+                label = f"{i+1} | {src} | {ts} | {amt} | {str(msg)[:60]}"
+                # map to corresponding range name used for write (history->RANGE, append->APPEND_RANGE)
+                if src == 'append':
+                    tgt_range = APPEND_RANGE
+                else:
+                    tgt_range = RANGE
+                # store mapping only if idx is not null
+                try:
+                    if pd.isna(idx):
+                        continue
+                except Exception:
+                    pass
+                selectable_labels.append(label)
+                selectable_label_to_target[label] = (tgt_range, int(idx))
+            if selectable_labels:
+                selectable = True
+
     # ------------------ NEW: Remove selected rows (soft-delete) UI ------------------
-    if data_source == "Google Sheet (optional)" and io_mod is not None and sheet_full_df is not None:
+    if data_source == "Google Sheet (optional)" and io_mod is not None and not sheet_full_df.empty:
         st.markdown("---")
         st.write("Bulk actions (Google Sheet only)")
         col_a, col_b = st.columns([3, 1])
         with col_a:
             if selectable:
-                # present multiselect with labels but return sheet indices
-                selected_sheet_idxs = st.multiselect(
+                selected_labels = st.multiselect(
                     "Select rows to remove (soft-delete)",
-                    options=selectable_values,
-                    format_func=lambda v, idx_map=dict(zip(selectable_values, selectable_labels)): idx_map.get(v, str(v))
+                    options=selectable_labels
                 )
             else:
                 st.info("Row selection for deletion is not available (cannot map visible rows back to sheet rows).")
-                selected_sheet_idxs = []
-
+                selected_labels = []
         with col_b:
             remove_btn = st.button("Remove selected rows", key="remove_rows_btn")
 
@@ -565,45 +523,51 @@ else:
                 st.error("io_helpers not available; cannot perform delete.")
             elif not SHEET_ID:
                 st.error("No Sheet ID provided.")
-            elif not selected_sheet_idxs:
+            elif not selected_labels:
                 st.warning("No rows selected.")
             else:
-                # prepare creds_info same way as load_from_sheet_safe
-                creds_info = None
-                try:
-                    if hasattr(st, "secrets") and st.secrets and "gcp_service_account" in st.secrets:
-                        raw = st.secrets["gcp_service_account"]
-                        creds_info = io_mod.parse_service_account_secret(raw)
-                except Exception as e:
-                    st.warning(f"Failed to parse st.secrets['gcp_service_account']: {e}")
-                    creds_info = None
+                # Group selected labels by target range
+                groups = {}
+                for lbl in selected_labels:
+                    tgt = selectable_label_to_target.get(lbl)
+                    if not tgt:
+                        continue
+                    rng, idx = tgt
+                    groups.setdefault(rng, []).append(idx)
 
-                try:
-                    res = io_mod.mark_rows_deleted(
-                        spreadsheet_id=SHEET_ID,
-                        range_name=RANGE,
-                        creds_info=creds_info,
-                        creds_file=CREDS_FILE,
-                        row_indices=list(map(int, selected_sheet_idxs))
-                    )
-                    if res.get('status') == 'ok':
-                        st.success(f"Marked {res.get('updated', 0)} rows as deleted.")
-                        st.experimental_rerun()
-                    else:
-                        st.error(f"Failed to mark rows deleted: {res.get('message')}")
-                except Exception as e:
-                    st.error(f"Error while marking rows deleted: {e}")
+                creds_info = _get_creds_info()
+                any_error = False
+                total_updated = 0
+                for rng, indices in groups.items():
+                    try:
+                        res = io_mod.mark_rows_deleted(
+                            spreadsheet_id=SHEET_ID,
+                            range_name=rng,
+                            creds_info=creds_info,
+                            creds_file=CREDS_FILE,
+                            row_indices=indices
+                        )
+                        if res.get('status') == 'ok':
+                            total_updated += int(res.get('updated', 0))
+                        else:
+                            st.error(f"Failed to mark rows deleted in {rng}: {res.get('message')}")
+                            any_error = True
+                    except Exception as e:
+                        st.error(f"Error while marking rows deleted in {rng}: {e}")
+                        any_error = True
 
-    # ------------------ NEW: Add new row form (Google Sheet only) ------------------
+                if not any_error:
+                    st.success(f"Marked {total_updated} rows as deleted.")
+                    st.experimental_rerun()
+
+    # ------------------ NEW: Add new row form (writes to Append sheet only) ------------------
     if data_source == "Google Sheet (optional)" and io_mod is not None:
         st.markdown("---")
-        st.write("Add a new row to the Google Sheet")
+        st.write("Add a new row to the Append sheet")
         with st.expander("Open add row form"):
             with st.form("add_row_form", clear_on_submit=True):
-                # sensible defaults: date = selected_date if available else today
                 default_dt = selected_date if 'selected_date' in locals() else datetime.utcnow().date()
                 new_date = st.date_input("Date", value=default_dt, min_value=min_date, max_value=max_date)
-                # Bank choices from the detected banks (allow typing custom)
                 bank_choice = st.selectbox("Bank", options=(banks_detected + ["Other (enter below)"]) if banks_detected else ["Other (enter below)"])
                 bank_other = ""
                 if bank_choice == "Other (enter below)":
@@ -614,39 +578,35 @@ else:
                 submit_add = st.form_submit_button("Save new row")
 
                 if submit_add:
-                    # Build new row dict. Keys will be matched case-insensitively by append_new_row.
-                    new_row = {}
-                    # Try to provide both 'timestamp' and 'date' fields (some sheets use one or other)
-                    new_row['timestamp'] = pd.Timestamp(new_date).to_pydatetime()
-                    new_row['date'] = pd.Timestamp(new_date).to_pydatetime()
                     chosen_bank = bank_other if bank_choice == "Other (enter below)" and bank_other else (bank_choice if bank_choice != "Other (enter below)" else "")
-                    new_row['Bank'] = chosen_bank
-                    new_row['Type'] = txn_type
-                    new_row['Amount'] = amount
-                    new_row['Message'] = message
-                    # ensure not deleted
-                    new_row['is_deleted'] = False
+                    # combine selected date with current time to build DateTime
+                    now = datetime.utcnow()
+                    # use current local time-of-day from now
+                    dt_combined = datetime.combine(new_date, now.time())
+                    # prefer writing a 'DateTime' column (sheet expects DateTime); also include timestamp/date
+                    new_row = {
+                        'DateTime': dt_combined.strftime("%Y-%m-%d %H:%M:%S"),
+                        'timestamp': dt_combined,  # for compatibility
+                        'date': dt_combined.date(),
+                        'Bank': chosen_bank,
+                        'Type': txn_type,
+                        'Amount': amount,
+                        'Message': message,
+                        'is_deleted': 'false'  # string 'false' by default
+                    }
 
-                    # prepare creds_info same way as load_from_sheet_safe
-                    creds_info = None
-                    try:
-                        if hasattr(st, "secrets") and st.secrets and "gcp_service_account" in st.secrets:
-                            raw = st.secrets["gcp_service_account"]
-                            creds_info = io_mod.parse_service_account_secret(raw)
-                    except Exception as e:
-                        st.warning(f"Failed to parse st.secrets['gcp_service_account']: {e}")
-                        creds_info = None
-
+                    creds_info = _get_creds_info()
                     try:
                         res = io_mod.append_new_row(
                             spreadsheet_id=SHEET_ID,
-                            range_name=RANGE,
+                            range_name=APPEND_RANGE,
                             new_row_dict=new_row,
                             creds_info=creds_info,
-                            creds_file=CREDS_FILE
+                            creds_file=CREDS_FILE,
+                            history_range=RANGE  # ensures headers are synced
                         )
                         if res.get('status') == 'ok':
-                            st.success("Appended new row to Google Sheet.")
+                            st.success("Appended new row to Append sheet.")
                             st.experimental_rerun()
                         else:
                             st.error(f"Failed to append row: {res.get('message')}")
@@ -654,7 +614,6 @@ else:
                         st.error(f"Error while appending new row: {e}")
 
 # ------------------ Totals for selected date / range ------------------
-# Build a human-friendly title (date + weekday for single day, or start → end for range)
 if start_sel == end_sel:
     try:
         title_date = start_sel.strftime("%Y-%m-%d (%A)")
@@ -667,7 +626,6 @@ else:
 st.markdown(f"### {totals_heading}")
 
 try:
-    # Work on a copy of filtered rows that already had timestamp normalized
     tmp_rows = converted_df_filtered.copy()
     if 'timestamp' in tmp_rows.columns:
         tmp_rows['timestamp'] = pd.to_datetime(tmp_rows['timestamp'], errors='coerce')
@@ -677,11 +635,9 @@ try:
         else:
             tmp_rows['timestamp'] = pd.NaT
 
-    # mask rows inside selection (inclusive)
     mask_sel = tmp_rows['timestamp'].dt.date.between(start_sel, end_sel)
     sel_df = tmp_rows[mask_sel].copy()
 
-    # find case-insensitive column names
     col_map_lower = {c.lower(): c for c in sel_df.columns}
     amount_col = col_map_lower.get('amount')
     type_col = col_map_lower.get('type')
@@ -708,7 +664,6 @@ try:
                 credit_count = int(credit_mask.sum())
                 debit_count = int(debit_mask.sum())
             else:
-                # no Type column - fallback heuristic
                 credit_sum = 0.0
                 debit_sum = 0.0
                 credit_count = 0
@@ -726,7 +681,6 @@ try:
                         debit_sum += amt
                         debit_count += 1
 
-    # Show as three metrics horizontally
     col1, col2, col3 = st.columns(3)
     col1.metric(f"Credits ({start_sel} → {end_sel})", f"₹{credit_sum:,.0f}", f"{credit_count} txns")
     col2.metric(f"Debits ({start_sel} → {end_sel})", f"₹{debit_sum:,.0f}", f"{debit_count} txns")
