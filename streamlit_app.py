@@ -28,6 +28,13 @@ try:
 except Exception:
     charts_mod = None
 
+# ------------------ Read secrets (preferred) ------------------
+_secrets = getattr(st, "secrets", {}) or {}
+SHEET_ID_SECRET = _secrets.get("SHEET_ID")
+RANGE_SECRET = _secrets.get("RANGE")
+APPEND_RANGE_SECRET = _secrets.get("APPEND_RANGE")
+CREDS_FILE_SECRET = _secrets.get("CREDS_FILE")  # optional
+
 # ------------------ Sidebar: data source & options ------------------
 with st.sidebar:
     st.header("Data input & options")
@@ -37,11 +44,33 @@ with st.sidebar:
         index=0
     )
 
-    SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="1KZq_GLXdMBfQUhtp-NA8Jg-flxOppw7kFuIN6y_nOXk")
-    RANGE = st.text_input("History sheet name or range", value="History Transactions")
-    # New: append sheet name/range
-    APPEND_RANGE = st.text_input("Append sheet name or range", value="Append Transactions")
-    CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
+    st.markdown("**Google Sheet configuration (preferred via Streamlit secrets)**")
+    st.caption("Add the following keys to your Streamlit secrets.toml / deployment: SHEET_ID, RANGE, APPEND_RANGE, CREDS_FILE (optional)")
+
+    # If secrets provided use them, otherwise show text inputs for local override
+    if SHEET_ID_SECRET:
+        st.write("SHEET_ID: (loaded from secrets)")
+        SHEET_ID = SHEET_ID_SECRET
+    else:
+        SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
+
+    if RANGE_SECRET:
+        st.write("RANGE (history sheet): (loaded from secrets)")
+        RANGE = RANGE_SECRET
+    else:
+        RANGE = st.text_input("History sheet name or range", value="History Transactions")
+
+    if APPEND_RANGE_SECRET:
+        st.write("APPEND_RANGE (append sheet): (loaded from secrets)")
+        APPEND_RANGE = APPEND_RANGE_SECRET
+    else:
+        APPEND_RANGE = st.text_input("Append sheet name or range", value="Append Transactions")
+
+    if CREDS_FILE_SECRET:
+        st.write("CREDS_FILE: (loaded from secrets)")
+        CREDS_FILE = CREDS_FILE_SECRET
+    else:
+        CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
 
     st.markdown("---")
     st.write("Series to include")
@@ -186,7 +215,7 @@ df_raw = pd.DataFrame()
 
 if data_source == "Google Sheet (optional)":
     if not SHEET_ID:
-        st.sidebar.info("Enter Google Sheet ID to enable sheet loading.")
+        st.sidebar.info("Enter Google Sheet ID to enable sheet loading (or add to Streamlit secrets).")
         df_raw = pd.DataFrame()
     else:
         with st.spinner("Fetching Google Sheets (History + Append)..."):
@@ -210,8 +239,6 @@ if data_source == "Google Sheet (optional)":
                 sheet_full_df = pd.DataFrame()
             else:
                 sheet_full_df = pd.concat([history_df, append_df], ignore_index=True, sort=False)
-                # ensure _sheet_row_idx present and int where available; rows from different sheets may have overlapping idx
-                # Keep per-row _source_sheet telling which sheet it came from; mark missing _sheet_row_idx as NaN
                 if '_sheet_row_idx' not in sheet_full_df.columns:
                     sheet_full_df['_sheet_row_idx'] = pd.NA
 
@@ -581,18 +608,18 @@ else:
                     chosen_bank = bank_other if bank_choice == "Other (enter below)" and bank_other else (bank_choice if bank_choice != "Other (enter below)" else "")
                     # combine selected date with current time to build DateTime
                     now = datetime.utcnow()
-                    # use current local time-of-day from now
+                    # use current UTC time-of-day from now
                     dt_combined = datetime.combine(new_date, now.time())
                     # prefer writing a 'DateTime' column (sheet expects DateTime); also include timestamp/date
                     new_row = {
                         'DateTime': dt_combined.strftime("%Y-%m-%d %H:%M:%S"),
-                        'timestamp': dt_combined,  # for compatibility
+                        'timestamp': dt_combined,
                         'date': dt_combined.date(),
                         'Bank': chosen_bank,
                         'Type': txn_type,
                         'Amount': amount,
                         'Message': message,
-                        'is_deleted': 'false'  # string 'false' by default
+                        'is_deleted': 'false'
                     }
 
                     creds_info = _get_creds_info()
@@ -614,6 +641,7 @@ else:
                         st.error(f"Error while appending new row: {e}")
 
 # ------------------ Totals for selected date / range ------------------
+# compute title / heading
 if start_sel == end_sel:
     try:
         title_date = start_sel.strftime("%Y-%m-%d (%A)")
