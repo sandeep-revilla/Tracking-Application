@@ -40,13 +40,16 @@ with st.sidebar:
     st.header("Data input & options")
     data_source = st.radio(
         "Load data from",
-        [ "Google Sheet", "Upload CSV/XLSX","Use sample data"],
+        ["Google Sheet", "Upload CSV/XLSX", "Use sample data"],
         index=0
     )
 
+    # make a boolean flag so checks are robust (don't rely on exact label text)
+    # we compute it here in the same sidebar context so it's immediately correct
+    use_google = isinstance(data_source, str) and data_source.lower().startswith("google")
+
     # If secrets provided use them, otherwise show text inputs for local override
     if SHEET_ID_SECRET:
-        
         SHEET_ID = SHEET_ID_SECRET
     else:
         SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
@@ -57,13 +60,11 @@ with st.sidebar:
         RANGE = st.text_input("History sheet name or range", value="History Transactions")
 
     if APPEND_RANGE_SECRET:
-        
         APPEND_RANGE = APPEND_RANGE_SECRET
     else:
         APPEND_RANGE = st.text_input("Append sheet name or range", value="Append Transactions")
 
     if CREDS_FILE_SECRET:
-        
         CREDS_FILE = CREDS_FILE_SECRET
     else:
         CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
@@ -235,7 +236,8 @@ if data_source == "Upload CSV/XLSX":
 sheet_full_df = pd.DataFrame()
 df_raw = pd.DataFrame()
 
-if data_source == "Google Sheet (optional)":
+# Use the boolean flag we created earlier
+if use_google:
     if not SHEET_ID:
         st.sidebar.info("Enter Google Sheet ID to enable sheet loading (or add to Streamlit secrets).")
         df_raw = pd.DataFrame()
@@ -561,7 +563,7 @@ else:
     selectable = False
     selectable_labels = []
     selectable_label_to_target = {}  # label -> (range_name, idx)
-    if data_source == "Google Sheet (optional)" and io_mod is not None and not sheet_full_df.empty:
+    if use_google and io_mod is not None and not sheet_full_df.empty:
         # Use converted_df_filtered (which should preserve _sheet_row_idx and _source_sheet)
         map_df = converted_df_filtered.copy()
         # Ensure mapping columns exist
@@ -607,7 +609,7 @@ else:
                 selectable = True
 
     # ------------------ NEW: Remove selected rows (soft-delete) UI ------------------
-    if data_source == "Google Sheet (optional)" and io_mod is not None and not sheet_full_df.empty:
+    if use_google and io_mod is not None and not sheet_full_df.empty:
         st.markdown("---")
         st.write("Bulk actions (Google Sheet only)")
         col_a, col_b = st.columns([3, 1])
@@ -666,7 +668,7 @@ else:
                     st.experimental_rerun()
 
     # ------------------ NEW: Add new row form (writes to Append sheet only) ------------------
-    if data_source == "Google Sheet (optional)" and io_mod is not None:
+    if use_google and io_mod is not None:
         st.markdown("---")
         st.write("Add a new row to the Append sheet")
         with st.expander("Open add row form"):
