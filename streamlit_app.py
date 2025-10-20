@@ -41,12 +41,12 @@ with st.sidebar:
     data_source = st.radio(
         "Load data from",
         ["Upload CSV/XLSX", "Google Sheet (optional)", "Use sample data"],
-        index=0
+        index=1
     )
 
     # If secrets provided use them, otherwise show text inputs for local override
     if SHEET_ID_SECRET:
-        st.write("SHEET_ID: (loaded from secrets)")
+        
         SHEET_ID = SHEET_ID_SECRET
     else:
         SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
