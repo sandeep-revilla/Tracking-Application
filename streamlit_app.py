@@ -299,7 +299,7 @@ with st.spinner("Computing daily totals..."):
 # ------------------ Sidebar: Date filters (moved above the table so table can obey selection) ------------------
 with st.sidebar:
     st.header("Filters")
-    if not merged.empty:
+    if merged is not None and not merged.empty:
         merged['Date'] = pd.to_datetime(merged['Date']).dt.normalize()
         years = sorted(merged['Date'].dt.year.unique().tolist())
         years_opts = ['All'] + [str(y) for y in years]
@@ -352,20 +352,47 @@ with st.sidebar:
         else:
             selected_date_range_for_totals = (dr, dr)
 
+# ------------------ Normalize start_sel / end_sel right away ------------------
+# This ensures start_sel/end_sel always exist and are datetime.date
+try:
+    start_sel, end_sel = selected_date_range_for_totals
+except Exception:
+    # fallback to last 30 days if something unexpected happened
+    end_sel = datetime.utcnow().date()
+    start_sel = end_sel - timedelta(days=30)
+
+# if values are datetime -> convert to date
+if isinstance(start_sel, datetime):
+    start_sel = start_sel.date()
+if isinstance(end_sel, datetime):
+    end_sel = end_sel.date()
+
+# Ensure ordering and clamp to min/max
+if start_sel is None:
+    start_sel = min_date
+if end_sel is None:
+    end_sel = max_date
+if start_sel < min_date:
+    start_sel = min_date
+if end_sel > max_date:
+    end_sel = max_date
+if start_sel > end_sel:
+    start_sel, end_sel = end_sel, start_sel
+
 # ------------------ Apply year/month filters to aggregated plot_df ------------------
-plot_df = merged.copy()
-if sel_year != 'All':
+plot_df = merged.copy() if merged is not None else pd.DataFrame()
+if sel_year != 'All' and not plot_df.empty:
     plot_df = plot_df[plot_df['Date'].dt.year == int(sel_year)]
-if sel_months:
+if sel_months and not plot_df.empty:
     month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1, 13)}
     inv_map = {v: k for k, v in month_map.items()}
     selected_month_nums = [inv_map[m] for m in sel_months if m in inv_map]
     if selected_month_nums:
         plot_df = plot_df[plot_df['Date'].dt.month.isin(selected_month_nums)]
 
-plot_df = plot_df.sort_values('Date').reset_index(drop=True)
-plot_df['Total_Spent'] = pd.to_numeric(plot_df.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64')
-plot_df['Total_Credit'] = pd.to_numeric(plot_df.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64')
+plot_df = plot_df.sort_values('Date').reset_index(drop=True) if not plot_df.empty else pd.DataFrame()
+plot_df['Total_Spent'] = pd.to_numeric(plot_df.get('Total_Spent', 0), errors='coerce').fillna(0.0).astype('float64') if not plot_df.empty else pd.Series(dtype='float64')
+plot_df['Total_Credit'] = pd.to_numeric(plot_df.get('Total_Credit', 0), errors='coerce').fillna(0.0).astype('float64') if not plot_df.empty else pd.Series(dtype='float64')
 
 # ------------------ Chart & rendering ------------------
 st.subheader("Daily Spend and Credit")
@@ -402,12 +429,7 @@ else:
         rows_df['timestamp'] = pd.NaT
 
 # apply selected date-range filter to rows (inclusive)
-start_sel, end_sel = selected_date_range_for_totals
-if isinstance(start_sel, datetime):
-    start_sel = start_sel.date()
-if isinstance(end_sel, datetime):
-    end_sel = end_sel.date()
-
+# Use the normalized start_sel / end_sel defined earlier
 if start_sel and end_sel:
     rows_df = rows_df[
         (rows_df['timestamp'].dt.date >= start_sel) &
@@ -593,7 +615,7 @@ else:
         st.write("Add a new row to the Append sheet")
         with st.expander("Open add row form"):
             with st.form("add_row_form", clear_on_submit=True):
-                default_dt = selected_date if 'selected_date' in locals() else datetime.utcnow().date()
+                default_dt = start_sel if 'start_sel' in locals() else datetime.utcnow().date()
                 new_date = st.date_input("Date", value=default_dt, min_value=min_date, max_value=max_date)
                 bank_choice = st.selectbox("Bank", options=(banks_detected + ["Other (enter below)"]) if banks_detected else ["Other (enter below)"])
                 bank_other = ""
@@ -609,7 +631,10 @@ else:
                     # combine selected date with current time to build DateTime
                     now = datetime.utcnow()
                     # use current UTC time-of-day from now
-                    dt_combined = datetime.combine(new_date, now.time())
+                    try:
+                        dt_combined = datetime.combine(new_date, now.time())
+                    except Exception:
+                        dt_combined = now
                     # prefer writing a 'DateTime' column (sheet expects DateTime); also include timestamp/date
                     new_row = {
                         'DateTime': dt_combined.strftime("%Y-%m-%d %H:%M:%S"),
