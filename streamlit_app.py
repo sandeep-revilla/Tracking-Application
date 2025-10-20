@@ -117,6 +117,32 @@ def _read_sheet_with_index(spreadsheet_id: str, range_name: str, source_name: st
     df['_source_sheet'] = source_name
     return df
 
+# Robust date helpers
+def _to_pydate(val):
+    """Coerce many date-like values to a python datetime.date or return None."""
+    if val is None:
+        return None
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    try:
+        ts = pd.to_datetime(val, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return ts.date()
+    except Exception:
+        return None
+
+def _ensure_min_max_order(min_d, max_d):
+    """Coerce both to python dates and swap if necessary. Returns (min_date, max_date)."""
+    min_d = _to_pydate(min_d) or datetime.utcnow().date()
+    max_d = _to_pydate(max_d) or datetime.utcnow().date()
+    if min_d > max_d:
+        st.warning("Computed min_date > max_date — swapping them.")
+        min_d, max_d = max_d, min_d
+    return min_d, max_d
+
 # ------------------ Data loaders (safe wrappers) ------------------
 def load_from_upload(uploaded_file) -> pd.DataFrame:
     if uploaded_file is None:
@@ -328,8 +354,9 @@ try:
         tmp['timestamp'] = pd.NaT
     valid_dates = tmp['timestamp'].dropna()
     if not valid_dates.empty:
-        min_date = valid_dates.min().date()
-        max_date = valid_dates.max().date()
+        raw_min = valid_dates.min()
+        raw_max = valid_dates.max()
+        min_date, max_date = _ensure_min_max_order(raw_min, raw_max)
     else:
         max_date = datetime.utcnow().date()
         min_date = max_date - timedelta(days=365)
@@ -341,16 +368,49 @@ with st.sidebar:
     st.markdown("---")
     st.write("Select a date (or range) for the totals & table below")
     totals_mode = st.radio("Totals mode", ["Single date", "Date range"], index=0)
+
+    # ensure min_date/max_date are python dates and ordered
+    min_date, max_date = _ensure_min_max_order(min_date, max_date)
+
     if totals_mode == "Single date":
-        selected_date = st.date_input("Pick date", value=datetime.utcnow().date(), min_value=min_date, max_value=max_date)
+        # default: clamp today into the allowed range
+        today = datetime.utcnow().date()
+        default_date = max(min_date, min(today, max_date))
+        try:
+            selected_date = st.date_input("Pick date", value=default_date, min_value=min_date, max_value=max_date)
+        except Exception:
+            st.warning("Date widget initialization failed with bounds — showing unrestricted picker.")
+            selected_date = st.date_input("Pick date", value=default_date)
+        if isinstance(selected_date, datetime):
+            selected_date = selected_date.date()
         selected_date_range_for_totals = (selected_date, selected_date)
     else:
         default_range = (min_date, max_date)
-        dr = st.date_input("Pick start & end", value=default_range, min_value=min_date, max_value=max_date)
-        if isinstance(dr, (tuple, list)):
-            selected_date_range_for_totals = (dr[0], dr[1])
+        try:
+            dr = st.date_input("Pick start & end", value=default_range, min_value=min_date, max_value=max_date)
+        except Exception:
+            st.warning("Range date widget initialization failed with bounds — showing unrestricted range picker.")
+            dr = st.date_input("Pick start & end", value=default_range)
+
+        # Normalize dr into start & end
+        if isinstance(dr, (tuple, list)) and len(dr) == 2:
+            s_raw, e_raw = dr
         else:
-            selected_date_range_for_totals = (dr, dr)
+            s_raw = dr
+            e_raw = dr
+
+        s = _to_pydate(s_raw) or min_date
+        e = _to_pydate(e_raw) or max_date
+
+        # clamp to allowed window and ensure order
+        if s < min_date:
+            s = min_date
+        if e > max_date:
+            e = max_date
+        if s > e:
+            s, e = e, s
+
+        selected_date_range_for_totals = (s, e)
 
 # ------------------ Normalize start_sel / end_sel right away ------------------
 # This ensures start_sel/end_sel always exist and are datetime.date
@@ -630,7 +690,6 @@ else:
                     chosen_bank = bank_other if bank_choice == "Other (enter below)" and bank_other else (bank_choice if bank_choice != "Other (enter below)" else "")
                     # combine selected date with current time to build DateTime
                     now = datetime.utcnow()
-                    # use current UTC time-of-day from now
                     try:
                         dt_combined = datetime.combine(new_date, now.time())
                     except Exception:
