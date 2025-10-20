@@ -44,9 +44,6 @@ with st.sidebar:
         index=0
     )
 
-    st.markdown("**Google Sheet configuration (preferred via Streamlit secrets)**")
-    st.caption("Add the following keys to your Streamlit secrets.toml / deployment: SHEET_ID, RANGE, APPEND_RANGE, CREDS_FILE (optional)")
-
     # If secrets provided use them, otherwise show text inputs for local override
     if SHEET_ID_SECRET:
         st.write("SHEET_ID: (loaded from secrets)")
