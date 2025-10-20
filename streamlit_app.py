@@ -40,8 +40,8 @@ with st.sidebar:
     st.header("Data input & options")
     data_source = st.radio(
         "Load data from",
-        ["Upload CSV/XLSX", "Google Sheet", "Use sample data"],
-        index=1
+        [ "Google Sheet", "Upload CSV/XLSX","Use sample data"],
+        index=0
     )
 
     # If secrets provided use them, otherwise show text inputs for local override
