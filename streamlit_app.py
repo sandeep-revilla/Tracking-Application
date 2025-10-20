@@ -40,7 +40,7 @@ with st.sidebar:
     st.header("Data input & options")
     data_source = st.radio(
         "Load data from",
-        ["Upload CSV/XLSX", "Google Sheet (optional)", "Use sample data"],
+        ["Upload CSV/XLSX", "Google Sheet", "Use sample data"],
         index=1
     )
 
