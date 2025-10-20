@@ -52,19 +52,18 @@ with st.sidebar:
         SHEET_ID = st.text_input("Google Sheet ID (between /d/ and /edit)", value="")
 
     if RANGE_SECRET:
-        st.write("RANGE (history sheet): (loaded from secrets)")
         RANGE = RANGE_SECRET
     else:
         RANGE = st.text_input("History sheet name or range", value="History Transactions")
 
     if APPEND_RANGE_SECRET:
-        st.write("APPEND_RANGE (append sheet): (loaded from secrets)")
+        
         APPEND_RANGE = APPEND_RANGE_SECRET
     else:
         APPEND_RANGE = st.text_input("Append sheet name or range", value="Append Transactions")
 
     if CREDS_FILE_SECRET:
-        st.write("CREDS_FILE: (loaded from secrets)")
+        
         CREDS_FILE = CREDS_FILE_SECRET
     else:
         CREDS_FILE = st.text_input("Service Account JSON File (optional)", value="creds/service_account.json")
