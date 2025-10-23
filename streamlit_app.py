@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import importlib
 from datetime import datetime, timedelta, date, time as dt_time
+import math
 
 st.set_page_config(page_title="Daily Spend", layout="wide")
 st.title("💳 Daily Spending")
@@ -341,6 +342,59 @@ with st.sidebar:
         sel_year = 'All'
         sel_months = []
 
+    # ------------------ NEW: Metric controls (single month/year for the top-right average) ------------------
+    st.markdown("---")
+    st.subheader("Metric: Monthly average")
+    # Metric year options: only years available (no 'All' for metric; choose most recent by default)
+    try:
+        metric_year_opts = [str(y) for y in years] if (merged is not None and not merged.empty) else [str(datetime.utcnow().year)]
+    except Exception:
+        metric_year_opts = [str(datetime.utcnow().year)]
+    # try to default metric year to selected sel_year if it's specific
+    default_metric_year = str(datetime.utcnow().year)
+    if sel_year != 'All':
+        default_metric_year = sel_year
+    elif metric_year_opts:
+        default_metric_year = metric_year_opts[-1]
+
+    metric_year = st.selectbox("Metric Year", options=metric_year_opts, index=metric_year_opts.index(default_metric_year) if default_metric_year in metric_year_opts else 0)
+
+    # Metric month options for the chosen metric_year (if no months available, show all 12)
+    try:
+        myear_int = int(metric_year)
+        months_available = sorted(merged[merged['Date'].dt.year == myear_int]['Date'].dt.month.unique().tolist()) if (merged is not None and not merged.empty) else []
+    except Exception:
+        months_available = []
+
+    if months_available:
+        metric_month_map = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in months_available}
+        metric_month_choices = [metric_month_map[m] for m in months_available]
+    else:
+        # fallback to full months list
+        metric_month_choices = [pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1, 13)]
+
+    # default: if the user had selected exactly one month in sel_months use that, otherwise pick the most recent available
+    default_metric_month = None
+    if isinstance(sel_months, (list, tuple)) and len(sel_months) == 1:
+        default_metric_month = sel_months[0]
+    else:
+        # pick most recent available month in the metric_year if possible
+        try:
+            if months_available:
+                default_metric_month = pd.Timestamp(1900, months_available[-1], 1).strftime('%B')
+        except Exception:
+            default_metric_month = metric_month_choices[-1] if metric_month_choices else pd.Timestamp(1900, datetime.utcnow().month, 1).strftime('%B')
+
+    if default_metric_month not in metric_month_choices:
+        # ensure default is valid
+        default_metric_month = metric_month_choices[-1] if metric_month_choices else pd.Timestamp(1900, datetime.utcnow().month, 1).strftime('%B')
+
+    metric_month = st.selectbox("Metric Month", options=metric_month_choices, index=metric_month_choices.index(default_metric_month) if default_metric_month in metric_month_choices else 0)
+
+    # Checkbox to replace outliers with month median before computing the average
+    replace_outliers_checkbox = st.checkbox("Replace outliers with month median when computing average", value=False)
+    st.caption("Outliers detected via IQR rule. Charts are NOT affected by this setting; only the displayed average uses cleaned data.")
+
 # Build safe min/max from available filtered rows (fallback to last 365 days)
 try:
     tmp = converted_df_filtered.copy()
@@ -454,6 +508,153 @@ plot_df['Total_Credit'] = pd.to_numeric(plot_df.get('Total_Credit', 0), errors='
 
 # ------------------ Chart & rendering ------------------
 st.subheader("Daily Spend and Credit")
+
+# ------------------ NEW: Compute metric values and render top-right display ------------------
+def _safe_mean(s):
+    s = pd.to_numeric(s, errors='coerce').dropna()
+    return float(s.mean()) if not s.empty else None
+
+def _format_currency(val):
+    try:
+        if val is None:
+            return "N/A"
+        return f"₹{val:,.2f}"
+    except Exception:
+        return str(val)
+
+def _month_year_to_date(year_str, month_name):
+    """Return a (year:int, month:int) tuple from inputs."""
+    try:
+        y = int(year_str)
+    except Exception:
+        y = datetime.utcnow().year
+    try:
+        m = pd.to_datetime(month_name, format='%B').month
+    except Exception:
+        try:
+            # if month_name is numeric string
+            m = int(month_name)
+        except Exception:
+            m = datetime.utcnow().month
+    return y, m
+
+def compute_month_avg_from_merged(merged_df, year, month, replace_outliers=False):
+    """
+    Compute average daily Total_Spent for the given year/month.
+    If replace_outliers True, detect outlier days via IQR and replace their Total_Spent
+    with the median of the non-outlier values for that month before averaging.
+    Returns (avg_value_or_None, count_days, details_dict)
+    """
+    if merged_df is None or merged_df.empty:
+        return None, 0, {"reason": "no_data"}
+
+    df = merged_df.copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    mask = (df['Date'].dt.year == int(year)) & (df['Date'].dt.month == int(month))
+    dfm = df.loc[mask].copy()
+    if dfm.empty:
+        return None, 0, {"reason": "no_rows_for_month"}
+
+    vals = pd.to_numeric(dfm.get('Total_Spent', 0), errors='coerce').fillna(0.0)
+    # If there's only 1 or 2 days of data, avoid aggressive replacement
+    if len(vals) < 3 or not replace_outliers:
+        return _safe_mean(vals), int(len(vals)), {"outliers_replaced": 0, "n": len(vals)}
+
+    # IQR-based outlier detection
+    q1 = vals.quantile(0.25)
+    q3 = vals.quantile(0.75)
+    iqr = q3 - q1
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+
+    # flag outliers
+    is_outlier = (vals < lower) | (vals > upper)
+    non_outliers = vals[~is_outlier]
+    if non_outliers.empty:
+        # fallback: if everything flagged, use overall median
+        replacement = float(vals.median())
+    else:
+        replacement = float(non_outliers.median())
+
+    # replace outliers with replacement
+    vals_replaced = vals.copy()
+    vals_replaced[is_outlier] = replacement
+
+    avg_replaced = _safe_mean(vals_replaced)
+    return avg_replaced, int(len(vals_replaced)), {"outliers_replaced": int(is_outlier.sum()), "n": len(vals_replaced), "iqr": float(iqr), "lower": float(lower), "upper": float(upper)}
+
+# Compute metric for chosen metric_year & metric_month
+try:
+    metric_year_int, metric_month_int = _month_year_to_date(metric_year, metric_month)
+    metric_avg, metric_count, metric_info = compute_month_avg_from_merged(merged, metric_year_int, metric_month_int, replace_outliers=replace_outliers_checkbox)
+    # previous month
+    prev_month_date = datetime(metric_year_int, metric_month_int, 1) - pd.DateOffset(months=1)
+    prev_year = int(prev_month_date.year)
+    prev_month = int(prev_month_date.month)
+    prev_avg, prev_count, prev_info = compute_month_avg_from_merged(merged, prev_year, prev_month, replace_outliers=replace_outliers_checkbox)
+except Exception:
+    metric_avg, metric_count, metric_info = None, 0, {"reason": "compute_failed"}
+    prev_avg, prev_count, prev_info = None, 0, {"reason": "compute_failed"}
+
+# Render metric in a top row aligned to the right
+col_a, col_b, col_c = st.columns([6, 2, 2])
+# put the metric in the right-most column
+with col_c:
+    # Compose label like "Oct-25"
+    try:
+        label = pd.Timestamp(metric_year_int, metric_month_int, 1).strftime("%b-%y")
+    except Exception:
+        label = f"{metric_month} {metric_year}"
+    if metric_avg is None:
+        metric_text = "N/A"
+    else:
+        metric_text = _format_currency(metric_avg)
+
+    # compute delta and arrow
+    if prev_avg is None:
+        delta_text = "N/A"
+        arrow = ""
+        delta_html = f"<span style='font-size:14px;color:gray'>{delta_text}</span>"
+    else:
+        # delta = metric_avg - prev_avg (positive => spending increased)
+        diff = metric_avg - prev_avg if (metric_avg is not None and prev_avg is not None) else None
+        if diff is None:
+            delta_text = "N/A"
+            arrow = ""
+            delta_html = f"<span style='font-size:14px;color:gray'>{delta_text}</span>"
+        else:
+            # Show percent change if prev_avg non-zero, else show absolute
+            try:
+                if abs(prev_avg) > 1e-9:
+                    pct = (diff / abs(prev_avg)) * 100.0
+                    pct_s = f"{pct:+.1f}%"
+                    delta_label = pct_s
+                else:
+                    delta_label = f"{diff:+.2f}"
+            except Exception:
+                delta_label = f"{diff:+.2f}"
+
+            # determine color: increase = red, decrease = green (higher spending is considered worse => red)
+            if diff > 0:
+                color = "red"
+                arrow = "▲"
+            elif diff < 0:
+                color = "green"
+                arrow = "▼"
+            else:
+                color = "gray"
+                arrow = "►"
+
+            delta_html = f"<span style='font-size:14px;color:{color}; font-weight:600'>{arrow} {delta_label}</span>"
+
+    # Render block
+    st.markdown(f"<div style='text-align:right; padding:8px 4px;'>"
+                f"<div style='font-size:12px;color:#666;margin-bottom:2px'>{label}</div>"
+                f"<div style='font-size:20px;font-weight:700'>{metric_text}</div>"
+                f"<div>{delta_html}</div>"
+                f"</div>", unsafe_allow_html=True)
+
+# ------------------ Continue with original chart rendering ------------------
 if plot_df.empty:
     st.info("No data for the selected filters.")
 else:
