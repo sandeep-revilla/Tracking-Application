@@ -149,14 +149,23 @@ def sample_data():
         d = today - timedelta(days=29 - i)
         amt = (i % 5 + 1) * 100
         t = "credit" if i % 7 == 0 else "debit"
-        rows.append({"timestamp": pd.to_datetime(d), "description": f"Sample txn {i+1}", "Amount": amt, "Type": t, "Bank": "HDFC Bank" if i % 2 == 0 else "Indian Bank"})
+        stype = "card" if i % 5 == 0 else "bank_transfer"
+        rows.append({
+            "timestamp": pd.to_datetime(d), 
+            "description": f"Sample txn {i+1}", 
+            "Amount": amt, 
+            "Type": t, 
+            "Bank": "HDFC Bank" if i % 2 == 0 else "Indian Bank",
+            "Subtype": stype
+        })
     return pd.DataFrame(rows)
 
 # ------------------ Helper: bank detection (remains the same) ------------------
 def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
     df = df.copy()
     if 'Bank' in df.columns and not overwrite:
-        df['Bank'] = df['Bank'].astype(str).where(df['Bank'].notna(), 'Unknown')
+        # --- FIX: Clean existing Bank column ---
+        df['Bank'] = df['Bank'].astype(str).str.strip().where(df['Bank'].notna(), 'Unknown')
         return df
 
     cand_cols = ['bank', 'account', 'description', 'message', 'narration']
@@ -170,23 +179,40 @@ def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
         for patt, name in bank_map.items():
             if patt in text:
                 detected[i] = name; break
-    df['Bank'] = detected
+    # --- FIX: Ensure detected name is stripped ---
+    df['Bank'] = [d.strip() for d in detected]
     return df
 
 
-# --- NEW: Helper Function to Calculate Running Balance ---
+# --- CORRECTED: Helper Function to Calculate Running Balance (with Subtype fix) ---
 def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculates a running balance in-memory.
     It joins the starting balance and computes a cumsum.
+    Ignores transactions where subtype is 'card'.
     """
+    # Create a unique, temporary ID to safely merge
+    transactions_df = transactions_df.reset_index(drop=True).reset_index().rename(columns={'index': '_temp_uid'})
+
     if balance_df.empty:
         # If no balance info, just return the df with an empty 'Balance' col
         transactions_df['Balance'] = pd.NA
-        return transactions_df
+        return transactions_df.drop(columns=['_temp_uid'])
 
     # 1. Prepare transactions
     df = transactions_df.copy()
+    
+    # --- FIX: Strip bank names for a clean merge ---
+    df['Bank'] = df['Bank'].astype(str).str.strip()
+    
+    # --- NEW: Subtype Logic ---
+    # Find the subtype column, checking a few common names
+    subtype_col = next((c for c in df.columns if c.lower() in ['subtype', 'sub_type', 'sub type']), None)
+    if subtype_col:
+        df['subtype_norm'] = df[subtype_col].astype(str).str.lower().str.strip()
+    else:
+        df['subtype_norm'] = 'n/a' # Create a placeholder column if it doesn't exist
+    # --- End New Logic ---
     
     # Ensure a valid timestamp column exists
     if 'timestamp' in df.columns:
@@ -199,7 +225,7 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     df = df.dropna(subset=['timestamp']) # Can't balance without a date
     if df.empty:
         transactions_df['Balance'] = pd.NA
-        return transactions_df
+        return transactions_df.drop(columns=['_temp_uid'])
         
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0.0)
     df['Type_norm'] = df['Type'].astype(str).str.lower()
@@ -212,6 +238,10 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
 
     # 2. Prepare starting balances
     bal_info = balance_df[['Bank', 'Start_Balance', 'Start_Date']].copy()
+    
+    # --- FIX: Strip bank names for a clean merge ---
+    bal_info['Bank'] = bal_info['Bank'].astype(str).str.strip()
+    
     bal_info['Start_Balance'] = pd.to_numeric(bal_info['Start_Balance'], errors='coerce').fillna(0.0)
     bal_info['Start_Date'] = pd.to_datetime(bal_info['Start_Date'], errors='coerce')
     
@@ -228,15 +258,21 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     df['Start_Balance'] = df['Start_Balance'].fillna(0.0)
     df['Start_Date'] = df['Start_Date'].fillna(pd.Timestamp.min) # For banks not in balance sheet
 
-    # Only include amounts from transactions *on or after* the start date
+    # --- UPDATED: get_effective_amount function ---
     def get_effective_amount(row):
-        # Use .date() for clean comparison, ignoring time
-        if row['timestamp'].date() >= row['Start_Date'].date():
-            return row['Signed_Amount']
-        else:
+        # NEW: If it's a card transaction, its effect is 0
+        if row['subtype_norm'] == 'card':
+            return 0.0
+            
+        # If it's before the start date, its effect is 0
+        if row['timestamp'].date() < row['Start_Date'].date():
             return 0.0 # Ignore transactions before the start date
+        
+        # Otherwise, return the signed amount
+        return row['Signed_Amount']
     
     df['Effective_Signed_Amount'] = df.apply(get_effective_amount, axis=1)
+    # --- End Update ---
 
     # Group by bank and calculate the cumulative sum of effective amounts
     df['Running_Change'] = df.groupby('Bank')['Effective_Signed_Amount'].cumsum()
@@ -244,17 +280,13 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     # The final balance is the start balance + the running change
     df['Balance'] = df['Start_Balance'] + df['Running_Change']
 
-    # Create a unique key for merging, as timestamp alone might have duplicates
-    df = df.reset_index(drop=True).reset_index().rename(columns={'index': '_calc_index'})
-    transactions_df = transactions_df.reset_index(drop=True).reset_index().rename(columns={'index': '_calc_index'})
-
-    # Merge the 'Balance' column back into the original dataframe
+    # --- FIX: Merge back on the stable _temp_uid, not a scrambled index ---
     final_df = transactions_df.merge(
-        df[['_calc_index', 'Balance']],
-        on=['_calc_index'],
+        df[['_temp_uid', 'Balance']],
+        on='_temp_uid',
         how='left'
     )
-    final_df = final_df.drop(columns=['_calc_index'])
+    final_df = final_df.drop(columns=['_temp_uid']) # Clean up
     
     return final_df
 
@@ -317,13 +349,6 @@ with st.spinner("Cleaning data and calculating balances..."):
     # This adds the 'Balance' column to the dataframe
     converted_df_with_balance = calculate_running_balance(converted_df, balance_df)
     # --- END NEW ---
-
-
-# --- NEW: Debugging Expander ---
-with st.expander("Debug: Show 'Balances' Sheet Data"):
-    st.write("Here is the raw data read from your `Balances` sheet. Check column names (`Bank`, `Start_Balance`, `Start_Date`), spelling, and date formats:")
-    st.dataframe(balance_df)
-# --- END NEW ---
 
 
 # --- MODIFIED: Balance Calculation (Now just displays the *latest* balance) ---
@@ -607,6 +632,10 @@ if start_sel and end_sel and 'timestamp' in rows_df.columns and not rows_df['tim
 
 # --- MODIFIED: Display Table (Add 'Balance' column) ---
 _desired = ['timestamp', 'bank', 'type', 'amount', 'balance', 'message'] # Added 'balance'
+# --- ADDED: Include 'subtype' in desired columns if it exists ---
+if 'subtype' in converted_df_with_balance.columns.str.lower():
+    _desired.insert(5, 'subtype')
+
 col_map = {c.lower(): c for c in rows_df.columns}
 display_cols = [col_map[d] for d in _desired if d in col_map]
 if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map: display_cols.insert(0, col_map['date'])
@@ -623,15 +652,16 @@ else:
     amt_col = next((c for c in display_df.columns if c.lower() == 'amount'), None)
     if amt_col: display_df[amt_col] = pd.to_numeric(display_df[amt_col], errors='coerce')
     
-    # --- NEW: Format Balance column ---
     bal_col = next((c for c in display_df.columns if c.lower() == 'balance'), None)
     if bal_col: display_df[bal_col] = pd.to_numeric(display_df[bal_col], errors='coerce')
-    # --- END NEW ---
 
-    pretty_rename = {'timestamp':'Timestamp','date':'Timestamp','bank':'Bank','type':'Type','amount':'Amount','balance':'Balance','message':'Message'}
+    pretty_rename = {
+        'timestamp':'Timestamp','date':'Timestamp','bank':'Bank','type':'Type',
+        'amount':'Amount','balance':'Balance','message':'Message', 'subtype':'Subtype'
+    }
     display_df = display_df.rename(columns={c:pretty_rename[c.lower()] for c in display_df.columns if c.lower() in pretty_rename})
     
-    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Balance', 'Message'] if c in display_df.columns]
+    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Balance', 'Subtype', 'Message'] if c in display_df.columns]
     display_df = display_df[final_order]
 
 # Sort by timestamp descending for display
@@ -702,6 +732,9 @@ if use_google and io_mod is not None:
              bank_choice = st.selectbox("Bank", options=banks_for_add)
              bank_other = st.text_input("Bank (custom)") if bank_choice == "Other (enter below)" else ""
              txn_type = st.selectbox("Type", options=["debit", "credit"])
+             # --- NEW: Add Subtype field ---
+             subtype = st.selectbox("Subtype", options=["bank_transfer", "card", "upi", "other"], index=0)
+             # --- End New ---
              amount = st.number_input("Amount (₹)", value=0.0, step=1.0, format="%.2f")
              message = st.text_input("Message / Description", value="")
              submit_add = st.form_submit_button("Save New Row")
@@ -709,8 +742,17 @@ if use_google and io_mod is not None:
              if submit_add:
                  chosen_bank = bank_other if bank_other else (bank_choice if bank_choice != "Other (enter below)" else "Unknown")
                  dt_combined = datetime.combine(new_date, datetime.utcnow().time()) # Combine date + current time
-                 new_row = {'DateTime': dt_combined.strftime("%Y-%m-%d %H:%M:%S"), 'timestamp': dt_combined, 'date': dt_combined.date(),
-                            'Bank': chosen_bank, 'Type': txn_type, 'Amount': amount, 'Message': message, 'is_deleted': 'false'}
+                 new_row = {
+                     'DateTime': dt_combined.strftime("%Y-%m-%d %H:%M:%S"), 
+                     'timestamp': dt_combined, 
+                     'date': dt_combined.date(),
+                     'Bank': chosen_bank, 
+                     'Type': txn_type, 
+                     'Amount': amount, 
+                     'Message': message, 
+                     'is_deleted': 'false',
+                     'Subtype': subtype # --- NEW: Save subtype ---
+                 }
                  creds_info = _get_creds_info()
                  try:
                      res = io_mod.append_new_row(SHEET_ID, APPEND_RANGE, new_row, creds_info, CREDS_FILE, RANGE)
