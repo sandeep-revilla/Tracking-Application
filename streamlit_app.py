@@ -277,6 +277,14 @@ with st.sidebar:
         banks_available = sorted([b for b in converted_df['Bank'].unique() if pd.notna(b)])
         sel_banks = st.multiselect("Bank(s)", options=banks_available, default=banks_available, key="sel_banks")
 
+        # --- NEW FILTER ---
+        type_options = ["debit", "credit"]
+        sel_types = st.multiselect("Transaction Type(s)",
+                                  options=type_options,
+                                  default=type_options,
+                                  key="sel_types")
+        # --- END NEW FILTER ---
+
         min_amount_filter = st.number_input(
             "Amount >= (0 to disable)",
             min_value=0.0, value=0.0, step=100.0, format="%.2f", key="min_amount_filter"
@@ -310,13 +318,26 @@ with st.sidebar:
             end_sel = min(max_date_overall, e) if e else max_date_overall
             if start_sel > end_sel: start_sel, end_sel = end_sel, start_sel
 
-# --- Apply Core Filters (Bank, Amount) ---
+# --- Apply Core Filters (Bank, Type, Amount) ---
 # Start with the cleaned data
 converted_df_filtered = converted_df.copy()
 
 # Apply Bank Filter
 if sel_banks:
     converted_df_filtered = converted_df_filtered[converted_df_filtered['Bank'].isin(sel_banks)]
+
+# --- NEW FILTER APPLICATION ---
+# Apply Type Filter
+if sel_types:
+    type_col_name = next((c for c in converted_df_filtered.columns if c.lower() == 'type'), None)
+    if type_col_name:
+        # Ensure we compare lowercase to lowercase for consistency
+        converted_df_filtered = converted_df_filtered[converted_df_filtered[type_col_name].astype(str).str.lower().isin(sel_types)]
+    else:
+        # Only show a warning if the user *tried* to filter but the column is missing
+        if len(sel_types) < len(type_options): # i.e., they unselected one
+            st.warning("Cannot filter by Transaction Type: 'Type' column not found.")
+# --- END NEW FILTER APPLICATION ---
 
 # Apply Amount Filter (Globally)
 if min_amount_filter > 0.0:
