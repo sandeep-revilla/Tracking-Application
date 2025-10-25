@@ -417,6 +417,18 @@ except Exception:
     min_date = max_date - timedelta(days=365)
 
 with st.sidebar:
+    # --- MODIFICATION 1: ADD AMOUNT FILTER WIDGET ---
+    st.markdown("---")
+    st.write("Filter rows table by amount")
+    min_amount_filter = st.number_input(
+        "Show rows with Amount >= (0 to disable)", 
+        min_value=0.0, 
+        value=0.0, 
+        step=100.0, 
+        format="%.2f"
+    )
+    # --- END MODIFICATION 1 ---
+
     st.markdown("---")
     st.write("Select a date (or range) for the totals & table below")
     totals_mode = st.radio("Totals mode", ["Single date", "Date range"], index=0)
@@ -695,6 +707,29 @@ if start_sel and end_sel:
         (rows_df['timestamp'].dt.date <= end_sel)
     ]
 
+# --- MODIFICATION 2: APPLY THE AMOUNT FILTER ---
+# This filter is applied *after* the date filter and *only* to rows_df.
+# It does not affect `merged` (charts) or the totals logic below.
+if min_amount_filter > 0.0:
+    # Find the 'Amount' column, case-insensitive
+    amount_col_name = None
+    for col in rows_df.columns:
+        if col.lower() == 'amount':
+            amount_col_name = col
+            break
+    
+    if amount_col_name:
+        try:
+            # Ensure the column is numeric for comparison
+            rows_df[amount_col_name] = pd.to_numeric(rows_df[amount_col_name], errors='coerce')
+            rows_df = rows_df[rows_df[amount_col_name] >= min_amount_filter].copy()
+        except Exception as e:
+            st.warning(f"Could not apply amount filter: {e}")
+    else:
+        st.warning("Could not apply amount filter: 'Amount' column not found.")
+# --- END MODIFICATION 2 ---
+
+
 # Desired columns (case-insensitive)
 _desired = ['timestamp', 'bank', 'type', 'amount', 'suspicious', 'message']
 
@@ -780,6 +815,19 @@ else:
                     (map_df['timestamp'].dt.date >= start_sel) &
                     (map_df['timestamp'].dt.date <= end_sel)
                 ]
+            
+            # --- ALSO APPLY AMOUNT FILTER TO SELECTABLE ROWS ---
+            if min_amount_filter > 0.0:
+                amount_col_name = None
+                for col in map_df.columns:
+                    if col.lower() == 'amount':
+                        amount_col_name = col
+                        break
+                if amount_col_name:
+                    map_df[amount_col_name] = pd.to_numeric(map_df[amount_col_name], errors='coerce')
+                    map_df = map_df[map_df[amount_col_name] >= min_amount_filter].copy()
+
+
             # Build labels
             for i, r in map_df.iterrows():
                 ts = ''
