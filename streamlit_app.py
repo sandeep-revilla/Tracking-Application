@@ -319,6 +319,13 @@ with st.spinner("Cleaning data and calculating balances..."):
     # --- END NEW ---
 
 
+# --- NEW: Debugging Expander ---
+with st.expander("Debug: Show 'Balances' Sheet Data"):
+    st.write("Here is the raw data read from your `Balances` sheet. Check column names (`Bank`, `Start_Balance`, `Start_Date`), spelling, and date formats:")
+    st.dataframe(balance_df)
+# --- END NEW ---
+
+
 # --- MODIFIED: Balance Calculation (Now just displays the *latest* balance) ---
 st.subheader("🏦 Current Balances")
 
