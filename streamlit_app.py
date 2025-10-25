@@ -7,6 +7,7 @@ import math
 
 st.set_page_config(page_title="Daily Spend", layout="wide")
 st.title("💳 Daily Spending")
+st.info("ℹ️ **Disclaimer:** This data is for reference only and may be incomplete. Please cross-check with your official bank statements if you notice a large deviation in the balance.")
 
 # ------------------ Imports / placeholders ------------------
 # transform.py must exist and provide convert_columns_and_derives + compute_daily_totals
