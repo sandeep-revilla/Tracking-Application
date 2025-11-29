@@ -445,7 +445,7 @@ with st.sidebar:
         default_metric_month_idx = datetime.utcnow().month - 1
         metric_month = st.selectbox("Metric Month", options=metric_month_choices, index=default_metric_month_idx, key="metric_month")
 
-        replace_outliers_checkbox = st.checkbox("Clean outliers for metric avg", value=False, key="replace_outliers_checkbox")
+        replace_outliers_checkbox = st.checkbox("Clean outliers for metric avg", value=True, key="replace_outliers_checkbox")
         st.caption("Uses IQR rule. Affects only the top-right metric.")
 
     # --- Expander 2: Transaction Filters ---
