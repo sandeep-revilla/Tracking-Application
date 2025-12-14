@@ -188,108 +188,99 @@ def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
 # --- CORRECTED: Helper Function to Calculate Running Balance (with Subtype fix) ---
 def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculates a running balance in-memory.
-    It joins the starting balance and computes a cumsum.
-    Ignores transactions where subtype is 'card'.
+    Calculates running balance per bank.
+
+    RULE:
+      - Balance updates ONLY when:
+            Type == 'debit' AND Subtype == 'account'
+      - All other transactions do NOT affect balance
+      - Balance = Start_Balance + cumulative(debit-account amounts)
     """
-    # Create a unique, temporary ID to safely merge
-    transactions_df = transactions_df.reset_index(drop=True).reset_index().rename(columns={'index': '_temp_uid'})
+
+    # Stable merge key
+    transactions_df = (
+        transactions_df
+        .reset_index(drop=True)
+        .reset_index()
+        .rename(columns={'index': '_temp_uid'})
+    )
 
     if balance_df.empty:
-        # If no balance info, just return the df with an empty 'Balance' col
         transactions_df['Balance'] = pd.NA
         return transactions_df.drop(columns=['_temp_uid'])
 
-    # 1. Prepare transactions
     df = transactions_df.copy()
-    
-    # --- FIX: Strip bank names for a clean merge ---
+
+    # Normalize bank
     df['Bank'] = df['Bank'].astype(str).str.strip()
-    
-    # --- NEW: Subtype Logic ---
-    # Find the subtype column, checking a few common names
+
+    # Normalize subtype
     subtype_col = next((c for c in df.columns if c.lower() in ['subtype', 'sub_type', 'sub type']), None)
     if subtype_col:
         df['subtype_norm'] = df[subtype_col].astype(str).str.lower().str.strip()
     else:
-        df['subtype_norm'] = 'n/a' # Create a placeholder column if it doesn't exist
-    # --- End New Logic ---
-    
-    # Ensure a valid timestamp column exists
+        df['subtype_norm'] = ""
+
+    # Timestamp
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     elif 'date' in df.columns:
-         df['timestamp'] = pd.to_datetime(df['date'], errors='coerce')
+        df['timestamp'] = pd.to_datetime(df['date'], errors='coerce')
     else:
         df['timestamp'] = pd.NaT
-    
-    df = df.dropna(subset=['timestamp']) # Can't balance without a date
+
+    df = df.dropna(subset=['timestamp'])
     if df.empty:
         transactions_df['Balance'] = pd.NA
         return transactions_df.drop(columns=['_temp_uid'])
-        
+
+    # Normalize amount & type
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0.0)
-    df['Type_norm'] = df['Type'].astype(str).str.lower()
-    
-    # Create a 'signed' amount for credits (+) and debits (-)
-    df['Signed_Amount'] = df.apply(
-        lambda r: r['Amount'] if r['Type_norm'] == 'credit' else -r['Amount'], 
-        axis=1
-    )
+    df['Type_norm'] = df['Type'].astype(str).str.lower().str.strip()
 
-    # 2. Prepare starting balances
-    bal_info = balance_df[['Bank', 'Start_Balance', 'Start_Date']].copy()
-    
-    # --- FIX: Strip bank names for a clean merge ---
-    bal_info['Bank'] = bal_info['Bank'].astype(str).str.strip()
-    
-    bal_info['Start_Balance'] = pd.to_numeric(bal_info['Start_Balance'], errors='coerce').fillna(0.0)
-    bal_info['Start_Date'] = pd.to_datetime(bal_info['Start_Date'], errors='coerce')
-    
-    if bal_info['Start_Date'].isnull().any():
-        st.warning("Some banks in 'Balances' sheet are missing a Start_Date. Running balance may be incorrect.")
-        bal_info['Start_Date'] = bal_info['Start_Date'].fillna(pd.Timestamp.min) # Use earliest possible date as fallback
+    # ------------------------------
+    # 🔥 CORE FIX: EFFECTIVE AMOUNT
+    # ------------------------------
+    def effective_amount(row):
+        if row['Type_norm'] == 'debit' and row['subtype_norm'] == 'account':
+            return -row['Amount']   # debit reduces balance
+        return 0.0                 # EVERYTHING else ignored
 
-    # 3. Combine and Calculate
-    # Sort all transactions by date (and sheet index for stability)
-    df = df.sort_values(by=['timestamp', '_sheet_row_idx'])
-    
-    # Merge the starting balance info onto every transaction
-    df = df.merge(bal_info, on='Bank', how='left')
+    df['Effective_Signed_Amount'] = df.apply(effective_amount, axis=1)
+
+    # Prepare balances
+    bal = balance_df[['Bank', 'Start_Balance', 'Start_Date']].copy()
+    bal['Bank'] = bal['Bank'].astype(str).str.strip()
+    bal['Start_Balance'] = pd.to_numeric(bal['Start_Balance'], errors='coerce').fillna(0.0)
+    bal['Start_Date'] = pd.to_datetime(bal['Start_Date'], errors='coerce').fillna(pd.Timestamp.min)
+
+    # Sort transactions
+    sort_cols = ['timestamp']
+    if '_sheet_row_idx' in df.columns:
+        sort_cols.append('_sheet_row_idx')
+    df = df.sort_values(sort_cols)
+
+    # Merge balances
+    df = df.merge(bal, on='Bank', how='left')
     df['Start_Balance'] = df['Start_Balance'].fillna(0.0)
-    df['Start_Date'] = df['Start_Date'].fillna(pd.Timestamp.min) # For banks not in balance sheet
+    df['Start_Date'] = df['Start_Date'].fillna(pd.Timestamp.min)
 
-    # --- UPDATED: get_effective_amount function ---
-    def get_effective_amount(row):
-        # NEW: If it's a card transaction, its effect is 0
-        if row['subtype_norm'] == 'card':
-            return 0.0
-            
-        # If it's before the start date, its effect is 0
-        if row['timestamp'].date() < row['Start_Date'].date():
-            return 0.0 # Ignore transactions before the start date
-        
-        # Otherwise, return the signed amount
-        return row['Signed_Amount']
-    
-    df['Effective_Signed_Amount'] = df.apply(get_effective_amount, axis=1)
-    # --- End Update ---
+    # Ignore txns before start date
+    df.loc[df['timestamp'] < df['Start_Date'], 'Effective_Signed_Amount'] = 0.0
 
-    # Group by bank and calculate the cumulative sum of effective amounts
+    # Cumulative sum per bank
     df['Running_Change'] = df.groupby('Bank')['Effective_Signed_Amount'].cumsum()
-    
-    # The final balance is the start balance + the running change
     df['Balance'] = df['Start_Balance'] + df['Running_Change']
 
-    # --- FIX: Merge back on the stable _temp_uid, not a scrambled index ---
+    # Merge back safely
     final_df = transactions_df.merge(
         df[['_temp_uid', 'Balance']],
         on='_temp_uid',
         how='left'
     )
-    final_df = final_df.drop(columns=['_temp_uid']) # Clean up
-    
-    return final_df
+
+    return final_df.drop(columns=['_temp_uid'])
+
 
 
 # ------------------ Load raw data according to selection ----------------
