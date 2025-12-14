@@ -150,7 +150,7 @@ def sample_data():
         d = today - timedelta(days=29 - i)
         amt = (i % 5 + 1) * 100
         t = "credit" if i % 7 == 0 else "debit"
-        stype = "account" if i % 3 == 0 else ("card" if i % 5 == 0 else "bank_transfer")
+        stype = "card" if i % 5 == 0 else "bank_transfer"
         rows.append({
             "timestamp": pd.to_datetime(d), 
             "description": f"Sample txn {i+1}", 
@@ -185,12 +185,12 @@ def add_bank_column(df: pd.DataFrame, overwrite: bool = False) -> pd.DataFrame:
     return df
 
 
-# --- UPDATED: Helper Function to Calculate Running Balance (NEW LOGIC) ---
+# --- CORRECTED: Helper Function to Calculate Running Balance (with Subtype fix) ---
 def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculates a running balance in-memory.
-    Only updates balance when Type is 'credit' OR 'debit' AND Subtype is 'account'.
-    Ignores all other transactions (card, upi, other subtypes, etc.).
+    It joins the starting balance and computes a cumsum.
+    Ignores transactions where subtype is 'card'.
     """
     # Create a unique, temporary ID to safely merge
     transactions_df = transactions_df.reset_index(drop=True).reset_index().rename(columns={'index': '_temp_uid'})
@@ -206,27 +206,14 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     # --- FIX: Strip bank names for a clean merge ---
     df['Bank'] = df['Bank'].astype(str).str.strip()
     
-    # --- CRITICAL: Find Type and Subtype columns ---
-    type_col = next((c for c in df.columns if c.lower() in ['type']), None)
+    # --- NEW: Subtype Logic ---
+    # Find the subtype column, checking a few common names
     subtype_col = next((c for c in df.columns if c.lower() in ['subtype', 'sub_type', 'sub type']), None)
-    
-    if type_col:
-        df['type_norm'] = df[type_col].astype(str).str.lower().str.strip()
-    else:
-        df['type_norm'] = 'unknown'  # Create placeholder if Type column missing
-        
     if subtype_col:
         df['subtype_norm'] = df[subtype_col].astype(str).str.lower().str.strip()
     else:
-        df['subtype_norm'] = 'n/a'  # Create placeholder if Subtype column missing
-    
-    # --- NEW LOGIC: Only balance-relevant transactions ---
-    # Only transactions where (Type is credit OR debit) AND (Subtype is account) affect balance
-    balance_relevant_mask = (
-        (df['type_norm'].isin(['credit', 'debit'])) & 
-        (df['subtype_norm'] == 'account')
-    )
-    df['affects_balance'] = balance_relevant_mask
+        df['subtype_norm'] = 'n/a' # Create a placeholder column if it doesn't exist
+    # --- End New Logic ---
     
     # Ensure a valid timestamp column exists
     if 'timestamp' in df.columns:
@@ -242,10 +229,11 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
         return transactions_df.drop(columns=['_temp_uid'])
         
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0.0)
+    df['Type_norm'] = df['Type'].astype(str).str.lower()
     
-    # Create a 'signed' amount for credits (+) and debits (-) - BUT only for balance-relevant txns
+    # Create a 'signed' amount for credits (+) and debits (-)
     df['Signed_Amount'] = df.apply(
-        lambda r: r['Amount'] if r['type_norm'] == 'credit' else -r['Amount'] if r['type_norm'] == 'debit' else 0.0, 
+        lambda r: r['Amount'] if r['Type_norm'] == 'credit' else -r['Amount'], 
         axis=1
     )
 
@@ -260,7 +248,7 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     
     if bal_info['Start_Date'].isnull().any():
         st.warning("Some banks in 'Balances' sheet are missing a Start_Date. Running balance may be incorrect.")
-        bal_info['Start_Date'] = bal_info['Start_Date'].fillna(pd.Timestamp.min)
+        bal_info['Start_Date'] = bal_info['Start_Date'].fillna(pd.Timestamp.min) # Use earliest possible date as fallback
 
     # 3. Combine and Calculate
     # Sort all transactions by date (and sheet index for stability)
@@ -269,22 +257,23 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     # Merge the starting balance info onto every transaction
     df = df.merge(bal_info, on='Bank', how='left')
     df['Start_Balance'] = df['Start_Balance'].fillna(0.0)
-    df['Start_Date'] = df['Start_Date'].fillna(pd.Timestamp.min)
+    df['Start_Date'] = df['Start_Date'].fillna(pd.Timestamp.min) # For banks not in balance sheet
 
-    # --- UPDATED LOGIC: Only balance-relevant transactions contribute to balance change ---
+    # --- UPDATED: get_effective_amount function ---
     def get_effective_amount(row):
-        # NEW LOGIC: Must meet BOTH conditions to affect balance
-        if not row['affects_balance']:  # Type must be credit/debit AND subtype must be 'account'
+        # NEW: If it's a card transaction, its effect is 0
+        if row['subtype_norm'] == 'card':
             return 0.0
             
         # If it's before the start date, its effect is 0
         if row['timestamp'].date() < row['Start_Date'].date():
-            return 0.0
+            return 0.0 # Ignore transactions before the start date
         
         # Otherwise, return the signed amount
         return row['Signed_Amount']
     
     df['Effective_Signed_Amount'] = df.apply(get_effective_amount, axis=1)
+    # --- End Update ---
 
     # Group by bank and calculate the cumulative sum of effective amounts
     df['Running_Change'] = df.groupby('Bank')['Effective_Signed_Amount'].cumsum()
@@ -292,7 +281,7 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     # The final balance is the start balance + the running change
     df['Balance'] = df['Start_Balance'] + df['Running_Change']
 
-    # --- FIX: Merge back on the stable _temp_uid ---
+    # --- FIX: Merge back on the stable _temp_uid, not a scrambled index ---
     final_df = transactions_df.merge(
         df[['_temp_uid', 'Balance']],
         on='_temp_uid',
@@ -301,7 +290,7 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
     final_df = final_df.drop(columns=['_temp_uid']) # Clean up
     
     return final_df
-# --- END UPDATED BALANCE FUNCTION ---
+
 
 # ------------------ Load raw data according to selection ----------------
 uploaded = None
@@ -310,7 +299,7 @@ if data_source == "Upload CSV/XLSX":
 
 sheet_full_df = pd.DataFrame()
 df_raw = pd.DataFrame()
-balance_df = pd.DataFrame()
+balance_df = pd.DataFrame() # --- Dataframe for balances ---
 
 if use_google:
     if not SHEET_ID:
@@ -330,6 +319,7 @@ if use_google:
         if '_sheet_row_idx' not in sheet_full_df.columns: 
             sheet_full_df['_sheet_row_idx'] = sheet_full_df.index
         
+        # This is the crucial step for handling soft deletes
         if 'is_deleted' in sheet_full_df.columns:
             deleted_mask = sheet_full_df['is_deleted'].astype(str).str.lower().isin(['true', 't', '1', 'yes'])
             df_raw = sheet_full_df.loc[~deleted_mask].copy().reset_index(drop=True)
@@ -346,25 +336,32 @@ else:  # sample data
         {"Bank": "Indian Bank", "Start_Balance": 25000, "Start_Date": "2024-01-01"}
     ])
 
+
 if df_raw.empty:
     st.warning("No data loaded."); st.stop()
 
 # ------------------ Transform using transform.py ------------------
 with st.spinner("Cleaning data and calculating balances..."):
+    # Pass copy. This DF contains ALL non-deleted transactions.
     converted_df = transform.convert_columns_and_derives(df_raw.copy()) 
     converted_df = add_bank_column(converted_df, overwrite=False)
     
-    # Calculate running balance with NEW LOGIC
+    # --- NEW: Calculate running balance ---
+    # This adds the 'Balance' column to the dataframe
     converted_df_with_balance = calculate_running_balance(converted_df, balance_df)
+    # --- END NEW ---
 
-# --- Balance Calculation Display ---
+
+# --- MODIFIED: Balance Calculation (Now just displays the *latest* balance) ---
 st.subheader("🏦 Current Balances")
 
+# Ensure 'timestamp' exists for finding the latest row
 if 'timestamp' not in converted_df_with_balance.columns and 'date' in converted_df_with_balance.columns:
     converted_df_with_balance['timestamp'] = pd.to_datetime(converted_df_with_balance['date'])
 elif 'timestamp' not in converted_df_with_balance.columns:
      converted_df_with_balance['timestamp'] = pd.NaT
 
+# Get the latest row for each bank to find its most recent balance
 latest_balances_df = pd.DataFrame()
 if not converted_df_with_balance.empty and not converted_df_with_balance['timestamp'].isnull().all():
     latest_balances_df = converted_df_with_balance.loc[
@@ -388,6 +385,7 @@ if not latest_balances_df.empty and 'Balance' in latest_balances_df.columns:
              with balance_cols[i]:
                 st.metric(f"{bank_name} Balance", "N/A", "Check 'Balances' sheet")
 
+    # Show Total Balance
     with balance_cols[-1]:
          st.metric("Total Balance", f"₹{total_balance:,.0f}", "All Accounts")
 else:
@@ -397,9 +395,12 @@ else:
         st.info("Balance tracking not available for this data source.")
 
 st.markdown("---")
+# --- END MODIFIED BALANCE SECTION ---
 
-# --- Sidebar Filters (unchanged) ---
+
+# --- Define Filters in Sidebar Expanders ---
 with st.sidebar:
+    # --- Expander 1: Chart & Metric Options ---
     with st.expander("📊 Chart & Metric Options", expanded=False):
         st.write("**Chart Display**")
         show_debit_chart = st.checkbox("Show Debit on Chart", value=True, key="show_debit_chart")
@@ -409,6 +410,7 @@ with st.sidebar:
         st.write("**Chart Date Filter**")
         try:
              with st.spinner("Calculating overall totals for filters..."):
+                 # Use the dataframe *with* balance, as it's the master
                  merged_all_totals = transform.compute_daily_totals(converted_df_with_balance.copy()) 
              if not merged_all_totals.empty:
                  merged_all_totals['Date'] = pd.to_datetime(merged_all_totals['Date']).dt.normalize()
@@ -439,14 +441,15 @@ with st.sidebar:
         default_metric_year_idx = len(metric_year_opts) - 1 if metric_year_opts else 0
         metric_year = st.selectbox("Metric Year", options=metric_year_opts, index=default_metric_year_idx, key="metric_year")
 
-        metric_month_choices = list(month_map_chart.values())
+        metric_month_choices = list(month_map_chart.values()) # Use full month list
         default_metric_month_idx = datetime.utcnow().month - 1
         metric_month = st.selectbox("Metric Month", options=metric_month_choices, index=default_metric_month_idx, key="metric_month")
 
         replace_outliers_checkbox = st.checkbox("Clean outliers for metric avg", value=True, key="replace_outliers_checkbox")
         st.caption("Uses IQR rule. Affects only the top-right metric.")
 
-    with st.expander("🔍 Transaction Filters", expanded=True):
+    # --- Expander 2: Transaction Filters ---
+    with st.expander("🔍 Transaction Filters", expanded=True): # Expand by default
         st.write("**Filter Transactions By**")
         banks_available = sorted([b for b in converted_df_with_balance['Bank'].unique() if pd.notna(b)])
         sel_banks = st.multiselect("Bank(s)", options=banks_available, default=banks_available, key="sel_banks")
@@ -465,10 +468,12 @@ with st.sidebar:
         st.markdown("---")
         st.write("**Select Date Range for Table & Totals**")
         try:
+            # Use converted_df (all data) for date range options
             valid_dates_all = pd.to_datetime(converted_df_with_balance.get('timestamp', converted_df_with_balance.get('date')), errors='coerce').dropna()
             min_date_overall, max_date_overall = _ensure_min_max_order(valid_dates_all.min(), valid_dates_all.max()) if not valid_dates_all.empty else (datetime.utcnow().date() - timedelta(days=365), datetime.utcnow().date())
         except Exception:
             max_date_overall = datetime.utcnow().date(); min_date_overall = max_date_overall - timedelta(days=365)
+
 
         totals_mode = st.radio("Mode", ["Single date", "Date range"], index=0, key="totals_mode")
 
@@ -477,28 +482,34 @@ with st.sidebar:
             default_date = max(min_date_overall, min(today, max_date_overall))
             selected_date = st.date_input("Pick date", value=default_date, min_value=min_date_overall, max_value=max_date_overall, key="selected_date")
             start_sel, end_sel = selected_date, selected_date
-        else:
+        else: # Date range
             dr = st.date_input("Pick start & end", value=(min_date_overall, max_date_overall), min_value=min_date_overall, max_value=max_date_overall, key="date_range_picker")
             if isinstance(dr, (tuple, list)) and len(dr) == 2:
                 s_raw, e_raw = dr
-            else: s_raw, e_raw = dr, dr
+            else: s_raw, e_raw = dr, dr # Handle single date selection in range mode
             s, e = _to_pydate(s_raw), _to_pydate(e_raw)
             start_sel = max(min_date_overall, s) if s else min_date_overall
             end_sel = min(max_date_overall, e) if e else max_date_overall
             if start_sel > end_sel: start_sel, end_sel = end_sel, start_sel
 
-# --- Apply Core Filters ---
+# --- Apply Core Filters (Bank, Type, Amount) ---
+# Start with the cleaned data (which now includes the 'Balance' column)
 converted_df_filtered = converted_df_with_balance.copy()
 
+# Apply Bank Filter
 if sel_banks:
     converted_df_filtered = converted_df_filtered[converted_df_filtered['Bank'].isin(sel_banks)]
 
-type_col_name = next((c for c in converted_df_filtered.columns if c.lower() == 'type'), None)
-if sel_types and type_col_name:
-    converted_df_filtered = converted_df_filtered[converted_df_filtered[type_col_name].astype(str).str.lower().isin(sel_types)]
-elif len(sel_types) < len(type_options): 
-    st.warning("Cannot filter by Transaction Type: 'Type' column not found.")
+# Apply Type Filter
+if sel_types:
+    type_col_name = next((c for c in converted_df_filtered.columns if c.lower() == 'type'), None)
+    if type_col_name:
+        converted_df_filtered = converted_df_filtered[converted_df_filtered[type_col_name].astype(str).str.lower().isin(sel_types)]
+    else:
+        if len(sel_types) < len(type_options): 
+            st.warning("Cannot filter by Transaction Type: 'Type' column not found.")
 
+# Apply Amount Filter (Globally)
 if min_amount_filter > 0.0:
     amount_col_name = next((col for col in converted_df_filtered.columns if col.lower() == 'amount'), None)
     if amount_col_name:
@@ -508,11 +519,12 @@ if min_amount_filter > 0.0:
         except Exception as e: st.warning(f"Could not apply amount filter: {e}")
     else: st.warning("Amount filter needs 'Amount' column.")
 
-# --- Compute daily totals ---
-with st.spinner("Computing daily totals..."):
-    merged = transform.compute_daily_totals(converted_df_filtered.copy())
 
-# --- Prepare Chart Data ---
+# --- Compute daily totals (NOW uses filtered data) ---
+with st.spinner("Computing daily totals..."):
+    merged = transform.compute_daily_totals(converted_df_filtered.copy()) # Pass copy
+
+# --- Prepare Chart Data (Apply Chart Date Filters) ---
 plot_df = merged.copy() if merged is not None else pd.DataFrame()
 if not plot_df.empty:
      plot_df['Date'] = pd.to_datetime(plot_df['Date']).dt.normalize() 
@@ -531,9 +543,10 @@ if not plot_df.empty:
          else:
              plot_df[col] = 0.0
 else:
-     plot_df = pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit'])
+     plot_df = pd.DataFrame(columns=['Date', 'Total_Spent', 'Total_Credit']) # Empty structure
 
-# ------------------ Top-Right Metric (unchanged) ------------------
+
+# ------------------ Top-Right Metric Calculation & Rendering (remains mostly the same) ------------------
 def _safe_mean(s): s=pd.to_numeric(s, errors='coerce').dropna(); return float(s.mean()) if not s.empty else None
 def _format_currency(v): return f"₹{v:,.2f}" if v is not None else "N/A"
 def _month_year_to_date(y_str, m_name):
@@ -565,7 +578,7 @@ try:
 except Exception: metric_avg, prev_avg = None, None
 
 col_a, col_b, col_c = st.columns([6, 2, 2])
-with col_c:
+with col_c: # Metric display
     label = pd.Timestamp(metric_year_int, metric_month_int, 1).strftime("%b-%y")
     metric_text = _format_currency(metric_avg)
     delta_html = "<span style='font-size:14px;color:gray'>N/A</span>"
@@ -578,6 +591,7 @@ with col_c:
         delta_html = f"<span style='font-size:14px;color:{color}; font-weight:600'>{arrow} {delta_label}</span>"
     st.markdown(f"<div style='text-align:right; padding:8px 4px;'><div style='font-size:12px;color:#666;margin-bottom:2px'>{label}</div><div style='font-size:20px;font-weight:700'>{metric_text}</div><div>{delta_html}</div></div>", unsafe_allow_html=True)
 
+
 # ------------------ Chart Rendering ------------------
 st.subheader("📊 Daily Spend and Credit")
 if plot_df.empty:
@@ -589,8 +603,8 @@ else:
         if show_credit_chart: series_selected_chart.append('Total_Credit')
         try:
              charts_mod.render_chart(
-                 plot_df=plot_df,
-                 converted_df=converted_df_filtered,
+                 plot_df=plot_df, # Use chart-filtered data
+                 converted_df=converted_df_filtered, # Pass globally filtered for Top-N
                  chart_type=chart_type_select,
                  series_selected=series_selected_chart,
                  top_n=5 
@@ -601,28 +615,38 @@ else:
     else:
         st.info("charts.py not available.")
 
+
 # ------------------ Rows view & download ------------------
 st.subheader("📝 Rows (matching selection)")
 
+# Start from globally filtered (bank + type + amount)
 rows_df = converted_df_filtered.copy()
 
+# Ensure timestamp exists for date filtering
 if 'timestamp' in rows_df.columns: rows_df['timestamp'] = pd.to_datetime(rows_df['timestamp'], errors='coerce')
 elif 'date' in rows_df.columns: rows_df['timestamp'] = pd.to_datetime(rows_df['date'], errors='coerce')
 else: rows_df['timestamp'] = pd.NaT
 
+# Apply Table/Totals Date Range filter (start_sel, end_sel)
 if start_sel and end_sel and 'timestamp' in rows_df.columns and not rows_df['timestamp'].isnull().all():
     rows_df = rows_df[ (rows_df['timestamp'].dt.date >= start_sel) & (rows_df['timestamp'].dt.date <= end_sel) ]
 
-_desired = ['timestamp', 'bank', 'type', 'amount', 'balance', 'subtype', 'message']
+# --- MODIFIED: Display Table (Add 'Balance' column) ---
+_desired = ['timestamp', 'bank', 'type', 'amount', 'balance', 'message'] # Added 'balance'
+# --- ADDED: Include 'subtype' in desired columns if it exists ---
+if 'subtype' in converted_df_with_balance.columns.str.lower():
+    _desired.insert(5, 'subtype')
+
 col_map = {c.lower(): c for c in rows_df.columns}
 display_cols = [col_map[d] for d in _desired if d in col_map]
 if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map: display_cols.insert(0, col_map['date'])
 
-if not display_cols:
+if not display_cols: # Fallback
     st.warning("Could not find preferred columns - showing raw data."); display_df = rows_df
 else:
     display_df = rows_df[display_cols].copy()
     
+    # Formatting...
     ts_col = next((c for c in display_df.columns if c.lower() in ['timestamp', 'date']), None)
     if ts_col: display_df[ts_col] = pd.to_datetime(display_df[ts_col], errors='coerce').dt.strftime('%Y-%m-%d %H:%M').fillna('')
     
@@ -638,9 +662,10 @@ else:
     }
     display_df = display_df.rename(columns={c:pretty_rename[c.lower()] for c in display_df.columns if c.lower() in pretty_rename})
     
-    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Subtype', 'Balance', 'Message'] if c in display_df.columns]
+    final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Balance', 'Subtype', 'Message'] if c in display_df.columns]
     display_df = display_df[final_order]
 
+# Sort by timestamp descending for display
 if 'Timestamp' in display_df.columns:
     display_df = display_df.sort_values(by='Timestamp', ascending=False)
 
@@ -655,22 +680,27 @@ st.dataframe(
 )
 csv_bytes = display_df.to_csv(index=False).encode("utf-8")
 st.download_button("📥 Download Rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
+# --- END MODIFIED ---
 
-# ------------------ Google Sheets Actions (unchanged) ------------------
+
+# ------------------ Build selectable mapping for Delete UI ------------------
 selectable = False; selectable_labels = []; selectable_label_to_target = {}
 if use_google and io_mod is not None and not sheet_full_df.empty:
+    # Use rows_df which is already filtered by bank, amount, AND date range
     map_df = rows_df.copy()
     if '_sheet_row_idx' in map_df.columns and '_source_sheet' in map_df.columns:
         for i, r in map_df.iterrows():
              try: idx = int(r['_sheet_row_idx'])
-             except: continue
+             except: continue # Skip if index is invalid
              ts = pd.to_datetime(r.get('timestamp', '')).strftime('%Y-%m-%d %H:%M') if pd.notna(r.get('timestamp')) else ''
              amt = r.get('Amount', ''); msg = str(r.get('Message', r.get('message', '')) )[:60]; src = r.get('_source_sheet', 'history')
-             label = f"[{src}:{idx+2}] {ts} | {amt} | {msg}"
+             label = f"[{src}:{idx+2}] {ts} | {amt} | {msg}" # Show GSheet row index (idx+2 assumes 1 header row)
              tgt_range = APPEND_RANGE if src == 'append' else RANGE
              selectable_labels.append(label); selectable_label_to_target[label] = (tgt_range, idx)
         if selectable_labels: selectable = True
 
+
+# ------------------ Delete UI (remains the same logic, uses filtered selectable_labels) ------------------
 if use_google and io_mod is not None and not sheet_full_df.empty:
     st.markdown("---"); st.write("🗑️ Bulk Actions (Google Sheet only)")
     col_a, col_b = st.columns([3, 1])
@@ -692,6 +722,8 @@ if use_google and io_mod is not None and not sheet_full_df.empty:
              except Exception as e: st.error(f"Error ({rng}): {e}"); any_error = True
         if not any_error: st.success(f"Marked {total_updated} rows deleted."); st.cache_data.clear(); st.experimental_rerun()
 
+
+# ------------------ Add New Row UI (remains the same logic) ------------------
 if use_google and io_mod is not None:
     st.markdown("---"); st.write("➕ Add New Row (to Append sheet)")
     with st.expander("Open add row form"):
@@ -701,14 +733,16 @@ if use_google and io_mod is not None:
              bank_choice = st.selectbox("Bank", options=banks_for_add)
              bank_other = st.text_input("Bank (custom)") if bank_choice == "Other (enter below)" else ""
              txn_type = st.selectbox("Type", options=["debit", "credit"])
-             subtype = st.selectbox("Subtype", options=["account", "card", "upi", "other"], index=0)  # Default to 'account'
+             # --- NEW: Add Subtype field ---
+             subtype = st.selectbox("Subtype", options=["bank_transfer", "card", "upi", "other"], index=0)
+             # --- End New ---
              amount = st.number_input("Amount (₹)", value=0.0, step=1.0, format="%.2f")
              message = st.text_input("Message / Description", value="")
              submit_add = st.form_submit_button("Save New Row")
 
              if submit_add:
                  chosen_bank = bank_other if bank_other else (bank_choice if bank_choice != "Other (enter below)" else "Unknown")
-                 dt_combined = datetime.combine(new_date, datetime.utcnow().time())
+                 dt_combined = datetime.combine(new_date, datetime.utcnow().time()) # Combine date + current time
                  new_row = {
                      'DateTime': dt_combined.strftime("%Y-%m-%d %H:%M:%S"), 
                      'timestamp': dt_combined, 
@@ -718,7 +752,7 @@ if use_google and io_mod is not None:
                      'Amount': amount, 
                      'Message': message, 
                      'is_deleted': 'false',
-                     'Subtype': subtype
+                     'Subtype': subtype # --- NEW: Save subtype ---
                  }
                  creds_info = _get_creds_info()
                  try:
@@ -727,11 +761,13 @@ if use_google and io_mod is not None:
                      else: st.error(f"Failed: {res.get('message')}")
                  except Exception as e: st.error(f"Error: {e}")
 
-# ------------------ Totals ------------------
+
+# ------------------ Totals for selected date / range (Uses globally filtered + date filtered data) ------------------
 totals_heading = f"Totals — {start_sel}" if start_sel == end_sel else f"Totals — {start_sel} → {end_sel}"
 st.markdown(f"### {totals_heading}")
 
 try:
+    # Use rows_df which is already filtered by Bank, Amount, AND Date Range
     sel_df = rows_df.copy()
     col_map_lower = {c.lower(): c for c in sel_df.columns}
     amount_col = col_map_lower.get('amount'); type_col = col_map_lower.get('type')
@@ -746,12 +782,13 @@ try:
             credit_mask = sel_df['type_norm'] == 'credit'; debit_mask = sel_df['type_norm'] == 'debit'
             credit_sum = sel_df.loc[credit_mask, amount_col].sum(); debit_sum = sel_df.loc[debit_mask, amount_col].sum()
             credit_count = int(credit_mask.sum()); debit_count = int(debit_mask.sum())
-        else:
+        else: # Heuristic if no Type column
              for _, r in sel_df.iterrows():
                  amt = r[amount_col]
                  if amt < 0: credit_sum += abs(amt); credit_count += 1
                  else: debit_sum += amt; debit_count += 1
     else: st.warning("Cannot calculate totals: 'Amount' column not found.")
+
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Credits", f"₹{credit_sum:,.0f}", f"{credit_count} txns")
@@ -760,7 +797,3 @@ try:
 
 except Exception as e:
     st.error(f"Failed to compute totals: {e}")
-
-# ------------------ Balance Logic Summary ------------------
-st.markdown("---")
-st.info("💡 **Balance Logic**: Balance only updates for transactions where **Type = 'credit' OR 'debit'** AND **Subtype = 'account'**. Card/UPI/other transactions don't affect balance.")
