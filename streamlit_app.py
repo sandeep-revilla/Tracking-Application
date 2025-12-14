@@ -195,7 +195,7 @@ def calculate_running_balance(transactions_df: pd.DataFrame, balance_df: pd.Data
 
     # Effective amount (ignores cards and pre-start-date txns)
     def get_effective_amount(row):
-        if row['subtype_norm'] == 'card':
+        if row['subtype_norm'] in ['card', 'payzapp wallet']:
             return 0.0
         if row['timestamp'].date() < row['Start_Date'].date():
             return 0.0
