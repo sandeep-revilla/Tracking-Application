@@ -383,13 +383,19 @@ st.info(
 )
 
 # ─────────────────────────────────────────────
-# ── NOTIFICATION PANEL (dropdown) ────────────
+# ── NOTIFICATION PANEL (inline, same page) ───
 # ─────────────────────────────────────────────
 if st.session_state.get('show_notif_panel', False):
     st.markdown("---")
+
     panel_title_col, mark_all_col = st.columns([5, 2])
     with panel_title_col:
-        st.markdown(f"#### 🔔 Notifications &nbsp; <span style='background:#dc3545;color:white;padding:2px 10px;border-radius:12px;font-size:14px'>{unread_count} unread</span>", unsafe_allow_html=True)
+        st.markdown(
+            f"#### 🔔 Notifications &nbsp;"
+            f"<span style='background:#dc3545;color:white;padding:2px 10px;"
+            f"border-radius:12px;font-size:14px'>{unread_count} unread</span>",
+            unsafe_allow_html=True,
+        )
     with mark_all_col:
         if unread_count > 0:
             if st.button("✅ Mark all as read", key="mark_all_read_btn"):
@@ -404,52 +410,148 @@ if st.session_state.get('show_notif_panel', False):
     if notif_df.empty:
         st.info("No notifications yet. Large transactions above your threshold will appear here.")
     else:
-        # Sort: unread first, then by created_at desc
+        # Sort: unread first, then newest first
         display_notif = notif_df.copy()
-        display_notif['_unread_sort'] = (display_notif['is_read'].astype(str).str.lower() == 'false').astype(int)
-        display_notif = display_notif.sort_values(['_unread_sort', 'created_at'], ascending=[False, False])
+        display_notif['_unread_sort'] = (
+            display_notif['is_read'].astype(str).str.lower() == 'false'
+        ).astype(int)
+        display_notif = display_notif.sort_values(
+            ['_unread_sort', 'created_at'], ascending=[False, False]
+        ).reset_index(drop=True)
+
+        # Track which notification is expanded (uid stored in session state)
+        if '_expanded_notif_uid' not in st.session_state:
+            st.session_state['_expanded_notif_uid'] = None
 
         for _, nrow in display_notif.iterrows():
-            n_uid      = nrow.get('uid', '')
-            n_ts       = nrow.get('timestamp', '')
-            n_bank     = nrow.get('bank', '')
-            n_amount   = float(nrow.get('amount', 0) or 0)
-            n_msg      = str(nrow.get('message', ''))[:80]
-            n_is_read  = str(nrow.get('is_read', 'false')).lower() == 'true'
+            n_uid       = nrow.get('uid', '')
+            n_ts        = nrow.get('timestamp', '')
+            n_bank      = nrow.get('bank', '')
+            n_amount    = float(nrow.get('amount', 0) or 0)
+            n_msg       = str(nrow.get('message', ''))[:80]
+            n_subtype   = nrow.get('subtype', '—')
+            n_threshold = float(nrow.get('threshold', alert_threshold) or alert_threshold)
+            n_created   = nrow.get('created_at', '')
+            n_is_read   = str(nrow.get('is_read', 'false')).lower() == 'true'
+            is_expanded = st.session_state['_expanded_notif_uid'] == n_uid
 
-            bg_color   = "#f8f9fa" if n_is_read else "#fff8f8"
-            border     = "#dee2e6" if n_is_read else "#f5c2c7"
-            dot        = "⚪" if n_is_read else "🔴"
+            # ── Row summary card ─────────────────────────────────────────
+            bg_color = "#f8f9fa" if n_is_read else "#fff8f8"
+            border   = "#dee2e6" if n_is_read else "#f5c2c7"
+            dot      = "⚪" if n_is_read else "🔴"
+            arrow    = "▲" if is_expanded else "▼"
 
-            notif_left, notif_right = st.columns([7, 2])
-            with notif_left:
+            row_left, row_right = st.columns([8, 1])
+            with row_left:
                 st.markdown(
-                    f"""<div style="background:{bg_color};border:1px solid {border};border-radius:8px;
-                        padding:10px 14px;margin-bottom:6px;">
-                        {dot} <b>₹{n_amount:,.0f}</b> &nbsp;·&nbsp; {n_bank} &nbsp;·&nbsp; {n_ts[:16]}
+                    f"""<div style="background:{bg_color};border:1px solid {border};
+                        border-radius:8px;padding:10px 14px;margin-bottom:2px;cursor:pointer;">
+                        {dot} <b>₹{n_amount:,.0f}</b> &nbsp;·&nbsp;
+                        <b>{n_bank}</b> &nbsp;·&nbsp; {n_ts[:16]}
                         <br><small style="color:#666">{n_msg}</small>
                     </div>""",
                     unsafe_allow_html=True,
                 )
-            with notif_right:
-                # "View" navigates to detail page (Google mode) or expands inline (sample mode)
-                if use_google and SHEET_ID:
-                    detail_url = f"./Transaction_Detail?uid={n_uid}"
-                    st.markdown(
-                        f"<a href='{detail_url}' target='_self'>"
-                        f"<button style='width:100%;padding:6px;border-radius:6px;"
-                        f"background:#0d6efd;color:white;border:none;cursor:pointer;font-size:13px;'>"
-                        f"🔍 View</button></a>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    # Inline mark-read for sample mode
-                    if not n_is_read:
-                        if st.button("✅ Verify", key=f"inline_verify_{n_uid}"):
-                            if 'sample_notif_df' in st.session_state:
-                                st.session_state['sample_notif_df'].loc[
-                                    st.session_state['sample_notif_df']['uid'] == n_uid, 'is_read'
-                                ] = 'true'
+            with row_right:
+                # Toggle button — expand or collapse
+                if st.button(arrow, key=f"toggle_{n_uid}", help="Click to expand / collapse"):
+                    if is_expanded:
+                        st.session_state['_expanded_notif_uid'] = None
+                    else:
+                        st.session_state['_expanded_notif_uid'] = n_uid
+                        # Mark as read when opened
+                        if not n_is_read:
+                            if use_google and notif_mod and SHEET_ID:
+                                notif_mod.mark_notification_read(
+                                    SHEET_ID, n_uid,
+                                    creds_info=creds_info, creds_file=CREDS_FILE,
+                                )
+                                st.cache_data.clear()
+                            else:
+                                if 'sample_notif_df' in st.session_state:
+                                    st.session_state['sample_notif_df'].loc[
+                                        st.session_state['sample_notif_df']['uid'] == n_uid,
+                                        'is_read',
+                                    ] = 'true'
+                    st.rerun()
+
+            # ── Inline detail card (shown only when expanded) ────────────
+            if is_expanded:
+                over_by      = n_amount - n_threshold
+                status_color = "#6c757d" if n_is_read else "#dc3545"
+                status_label = "✅ Verified" if n_is_read else "🔴 Unread"
+
+                st.markdown(
+                    f"""
+                    <div style="background:#ffffff;border:1.5px solid #f5c2c7;border-radius:10px;
+                         padding:20px 24px;margin:4px 0 12px 0;
+                         box-shadow:0 2px 8px rgba(0,0,0,0.07);">
+
+                      <div style="display:flex;justify-content:space-between;
+                                  align-items:center;margin-bottom:14px;">
+                        <span style="font-size:22px;font-weight:700;">₹{n_amount:,.0f}</span>
+                        <span style="background:{status_color};color:white;padding:4px 12px;
+                              border-radius:20px;font-size:13px;">{status_label}</span>
+                      </div>
+
+                      <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                        <tr>
+                          <td style="color:#888;padding:5px 0;width:150px">🏦 Bank</td>
+                          <td><b>{n_bank}</b></td>
+                        </tr>
+                        <tr>
+                          <td style="color:#888;padding:5px 0">📅 Date & Time</td>
+                          <td><b>{n_ts}</b></td>
+                        </tr>
+                        <tr>
+                          <td style="color:#888;padding:5px 0">💬 Description</td>
+                          <td>{n_msg}</td>
+                        </tr>
+                        <tr>
+                          <td style="color:#888;padding:5px 0">🏷️ Subtype</td>
+                          <td>{n_subtype}</td>
+                        </tr>
+                        <tr>
+                          <td style="color:#888;padding:5px 0">⚠️ Threshold</td>
+                          <td>₹{n_threshold:,.0f}
+                            &nbsp;<span style="color:#dc3545;font-size:12px;">
+                              (₹{over_by:,.0f} over)
+                            </span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td style="color:#888;padding:5px 0">🕐 Flagged At</td>
+                          <td>{n_created}</td>
+                        </tr>
+                      </table>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # Mark as verified button (only if not already read)
+                if not n_is_read:
+                    btn_col, _ = st.columns([2, 5])
+                    with btn_col:
+                        if st.button(
+                            "✅ Mark as Verified",
+                            key=f"verify_inline_{n_uid}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            if use_google and notif_mod and SHEET_ID:
+                                notif_mod.mark_notification_read(
+                                    SHEET_ID, n_uid,
+                                    creds_info=creds_info, creds_file=CREDS_FILE,
+                                )
+                                st.cache_data.clear()
+                            else:
+                                if 'sample_notif_df' in st.session_state:
+                                    st.session_state['sample_notif_df'].loc[
+                                        st.session_state['sample_notif_df']['uid'] == n_uid,
+                                        'is_read',
+                                    ] = 'true'
+                            st.session_state['_expanded_notif_uid'] = None
                             st.rerun()
 
     st.markdown("---")
