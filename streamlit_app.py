@@ -704,6 +704,9 @@ else:
 # ─────────────────────────────────────────────
 st.subheader("📝 Rows (matching selection)")
 
+if use_google and io_mod is not None and not sheet_full_df.empty:
+    st.caption("💡 Click any row (or select multiple rows) to delete them. A confirmation pop-up will appear.")
+
 rows_df = converted_df_filtered.copy()
 if 'timestamp' in rows_df.columns:
     rows_df['timestamp'] = pd.to_datetime(rows_df['timestamp'], errors='coerce')
@@ -715,8 +718,9 @@ else:
 if start_sel and end_sel and not rows_df['timestamp'].isnull().all():
     rows_df = rows_df[(rows_df['timestamp'].dt.date >= start_sel) & (rows_df['timestamp'].dt.date <= end_sel)]
 
-_desired   = ['timestamp', 'bank', 'type', 'amount', 'Balance', 'subtype', 'message']
-col_map    = {c.lower(): c for c in rows_df.columns}
+# ── Build display_df ──────────────────────────────────────────────────────
+_desired     = ['timestamp', 'bank', 'type', 'amount', 'Balance', 'subtype', 'message']
+col_map      = {c.lower(): c for c in rows_df.columns}
 display_cols = [col_map[d] for d in _desired if d in col_map]
 if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map:
     display_cols.insert(0, col_map['date'])
@@ -731,71 +735,149 @@ if ts_col:  display_df[ts_col] = pd.to_datetime(display_df[ts_col], errors='coer
 if amt_col: display_df[amt_col] = pd.to_numeric(display_df[amt_col], errors='coerce')
 if bal_col: display_df[bal_col] = pd.to_numeric(display_df[bal_col], errors='coerce')
 
-pretty_rename = {'timestamp':'Timestamp','date':'Timestamp','bank':'Bank','type':'Type',
-                 'amount':'Amount','balance':'Balance','message':'Message','subtype':'Subtype'}
+pretty_rename = {'timestamp': 'Timestamp', 'date': 'Timestamp', 'bank': 'Bank', 'type': 'Type',
+                 'amount': 'Amount', 'balance': 'Balance', 'message': 'Message', 'subtype': 'Subtype'}
 display_df = display_df.rename(columns={c: pretty_rename[c.lower()] for c in display_df.columns if c.lower() in pretty_rename})
-final_order = [c for c in ['Timestamp','Bank','Type','Amount','Balance','Subtype','Message'] if c in display_df.columns]
-display_df  = display_df[final_order]
+final_order = [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Balance', 'Subtype', 'Message'] if c in display_df.columns]
+display_df  = display_df[final_order].reset_index(drop=True)
 if 'Timestamp' in display_df.columns:
-    display_df = display_df.sort_values(by='Timestamp', ascending=False)
+    display_df = display_df.sort_values(by='Timestamp', ascending=False).reset_index(drop=True)
 
-st.dataframe(
-    display_df.reset_index(drop=True), use_container_width=True, height=420,
-    column_config={
-        "Amount":  st.column_config.NumberColumn(format="₹%.2f"),
-        "Balance": st.column_config.NumberColumn(format="₹%.0f", help="Running balance after this transaction"),
-    },
-    hide_index=True,
-)
+# ── Render table — with row selection when Google Sheets is active ────────
+col_config = {
+    "Amount":  st.column_config.NumberColumn(format="₹%.2f"),
+    "Balance": st.column_config.NumberColumn(format="₹%.0f", help="Running balance after this transaction"),
+}
+
+can_delete = use_google and io_mod is not None and not sheet_full_df.empty
+
+if can_delete:
+    # Streamlit ≥1.35: on_select + selection_mode enables clickable rows
+    selection = st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=420,
+        column_config=col_config,
+        hide_index=False,           # show index so user sees row numbers
+        on_select="rerun",
+        selection_mode="multi-row",
+        key="txn_table",
+    )
+    selected_row_indices = selection.selection.rows if selection and selection.selection else []
+else:
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=420,
+        column_config=col_config,
+        hide_index=True,
+        key="txn_table_readonly",
+    )
+    selected_row_indices = []
+
 csv_bytes = display_df.to_csv(index=False).encode("utf-8")
-st.download_button("📥 Download Rows (CSV)", csv_bytes, file_name="transactions_rows.csv", mime="text/csv")
 
-# ─────────────────────────────────────────────
-# Delete UI (Google Sheets only)
-# ─────────────────────────────────────────────
-if use_google and io_mod is not None and not sheet_full_df.empty:
-    selectable_labels          = []
-    selectable_label_to_target = {}
-    map_df = rows_df.copy()
-    if '_sheet_row_idx' in map_df.columns and '_source_sheet' in map_df.columns:
-        for _, r in map_df.iterrows():
-            try: idx = int(r['_sheet_row_idx'])
-            except Exception: continue
-            ts  = pd.to_datetime(r.get('timestamp', '')).strftime('%Y-%m-%d %H:%M') if pd.notna(r.get('timestamp')) else ''
-            amt = r.get('Amount', '')
-            msg = str(r.get('Message', r.get('message', '')))[:60]
-            src = r.get('_source_sheet', 'history')
-            label = f"[{src}:{idx + 2}] {ts} | {amt} | {msg}"
-            selectable_labels.append(label)
-            selectable_label_to_target[label] = (APPEND_RANGE if src == 'append' else RANGE, idx)
+# ── Delete button + confirmation dialog ──────────────────────────────────
+if can_delete:
+    del_col, dl_col = st.columns([3, 2])
 
-    st.markdown("---")
-    st.write("🗑️ Bulk Actions (Google Sheet only)")
-    col_a, col_b = st.columns([3, 1])
-    with col_a:
-        selected_labels = st.multiselect("Select rows to remove (soft-delete)", options=selectable_labels, key="delete_multi") if selectable_labels else []
-        if not selectable_labels: st.info("Row selection unavailable.")
-    with col_b:
-        remove_btn = st.button("Remove selected", key="remove_rows_btn", disabled=not selectable_labels)
+    with dl_col:
+        st.download_button(
+            "📥 Download Rows (CSV)", csv_bytes,
+            file_name="transactions_rows.csv", mime="text/csv",
+        )
 
-    if remove_btn and selected_labels:
-        groups    = {}
-        any_error = False
-        creds_info = _get_creds_info()
-        for lbl in selected_labels:
-            rng, idx = selectable_label_to_target.get(lbl, (None, None))
-            if rng and idx is not None: groups.setdefault(rng, []).append(idx)
-        total_updated = 0
-        for rng, indices in groups.items():
-            try:
-                res = io_mod.mark_rows_deleted(SHEET_ID, rng, creds_info, CREDS_FILE, indices)
-                if res.get('status') == 'ok': total_updated += res.get('updated', 0)
-                else: st.error(f"Failed ({rng}): {res.get('message')}"); any_error = True
-            except Exception as e: st.error(f"Error ({rng}): {e}"); any_error = True
-        if not any_error:
-            st.success(f"Marked {total_updated} rows deleted.")
-            st.cache_data.clear()
-            st.rerun()
+    with del_col:
+        if selected_row_indices:
+            n_sel = len(selected_row_indices)
+            st.button(
+                f"🗑️ Delete {n_sel} selected row{'s' if n_sel > 1 else ''}",
+                key="open_delete_dialog_btn",
+                type="primary",
+                on_click=lambda: st.session_state.update({"_show_delete_dialog": True}),
+            )
+        else:
+            st.info("Select one or more rows in the table above to delete them.", icon="👆")
+
+    # ── Confirmation dialog ───────────────────────────────────────────────
+    if st.session_state.get("_show_delete_dialog") and selected_row_indices:
+
+        @st.dialog("🗑️ Confirm Delete")
+        def _confirm_delete_dialog():
+            n = len(selected_row_indices)
+            st.warning(
+                f"You are about to **soft-delete {n} transaction{'s' if n > 1 else ''}** "
+                f"from the Google Sheet. This sets `is_deleted = TRUE` on those rows "
+                f"and they will no longer appear in the app.",
+                icon="⚠️",
+            )
+
+            # Preview selected rows
+            st.markdown("**Selected transactions:**")
+            preview = display_df.iloc[selected_row_indices][
+                [c for c in ['Timestamp', 'Bank', 'Type', 'Amount', 'Message'] if c in display_df.columns]
+            ]
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("✅ Yes, delete", type="primary", use_container_width=True, key="confirm_del_yes"):
+                    # Map display row indices back to sheet rows_df (which preserves _sheet_row_idx)
+                    # display_df was sorted/filtered from rows_df — re-align via positional index
+                    rows_df_reset = rows_df.sort_values(
+                        by='timestamp', ascending=False
+                    ).reset_index(drop=True) if 'timestamp' in rows_df.columns else rows_df.reset_index(drop=True)
+
+                    groups    = {}
+                    any_error = False
+                    creds     = _get_creds_info()
+
+                    for pos in selected_row_indices:
+                        if pos >= len(rows_df_reset):
+                            continue
+                        r   = rows_df_reset.iloc[pos]
+                        src = r.get('_source_sheet', 'history') if '_source_sheet' in rows_df_reset.columns else 'history'
+                        try:
+                            idx = int(r['_sheet_row_idx']) if '_sheet_row_idx' in rows_df_reset.columns else -1
+                        except Exception:
+                            continue
+                        if idx < 0:
+                            continue
+                        rng = APPEND_RANGE if src == 'append' else RANGE
+                        groups.setdefault(rng, []).append(idx)
+
+                    total_updated = 0
+                    for rng, indices in groups.items():
+                        try:
+                            res = io_mod.mark_rows_deleted(SHEET_ID, rng, creds, CREDS_FILE, indices)
+                            if res.get('status') == 'ok':
+                                total_updated += res.get('updated', 0)
+                            else:
+                                st.error(f"Failed ({rng}): {res.get('message')}")
+                                any_error = True
+                        except Exception as e:
+                            st.error(f"Error ({rng}): {e}")
+                            any_error = True
+
+                    st.session_state["_show_delete_dialog"] = False
+                    if not any_error:
+                        st.success(f"✅ Deleted {total_updated} row(s) successfully.")
+                        st.cache_data.clear()
+                        st.rerun()
+
+            with cancel_col:
+                if st.button("✖ Cancel", use_container_width=True, key="confirm_del_cancel"):
+                    st.session_state["_show_delete_dialog"] = False
+                    st.rerun()
+
+        _confirm_delete_dialog()
+
+else:
+    # Non-Google mode: just show the download button
+    st.download_button(
+        "📥 Download Rows (CSV)", csv_bytes,
+        file_name="transactions_rows.csv", mime="text/csv",
+    )
 
 # ─────────────────────────────────────────────
 # Add New Row (Google Sheets only)
