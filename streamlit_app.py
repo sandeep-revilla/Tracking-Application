@@ -434,7 +434,7 @@ if st.session_state.get('show_notif_panel', False):
             with notif_right:
                 # "View" navigates to detail page (Google mode) or expands inline (sample mode)
                 if use_google and SHEET_ID:
-                    detail_url = f"./📋_Transaction_Detail?uid={n_uid}"
+                    detail_url = f"./Transaction_Detail?uid={n_uid}"
                     st.markdown(
                         f"<a href='{detail_url}' target='_self'>"
                         f"<button style='width:100%;padding:6px;border-radius:6px;"
@@ -498,7 +498,16 @@ with st.sidebar:
         show_credit_chart = st.checkbox("Show Credit on Chart", value=True,  key="show_credit_chart")
         chart_type_select = st.selectbox(
             "Chart Type",
-            ["Daily line", "Monthly bars", "Top categories (Top-N)"],
+            [
+                "Daily line",
+                "Monthly bars",
+                "Top categories (Top-N)",
+                "Weekly heatmap",
+                "Cumulative spend",
+                "Debit vs Credit pie",
+                "Bank breakdown",
+                "Day-of-week pattern",
+            ],
             index=0, key="chart_type_select",
         )
 
