@@ -358,9 +358,16 @@ else:
 # ─────────────────────────────────────────────
 # ── BELL ICON HEADER ─────────────────────────
 # ─────────────────────────────────────────────
+
+# CHANGED: compute unread_count defensively from raw notif_df (contains all notifications)
 unread_count = 0
 if not notif_df.empty and 'is_read' in notif_df.columns:
-    unread_count = int((notif_df['is_read'].astype(str).str.lower() == 'false').sum())
+    try:
+        unread_count = int((notif_df['is_read'].astype(str).str.lower() == 'false').sum())
+    except Exception:
+        unread_count = 0
+else:
+    unread_count = 0
 
 # Title row: app title left, bell right
 title_col, bell_col = st.columns([8, 1])
@@ -407,10 +414,14 @@ if st.session_state.get('show_notif_panel', False):
                         st.session_state['sample_notif_df']['is_read'] = 'true'
                 st.rerun()
 
+    # CHANGED: Filter out read notifications permanently so that once marked read they don't re-appear
+    if not notif_df.empty and 'is_read' in notif_df.columns:
+        notif_df = notif_df[notif_df['is_read'].astype(str).str.lower() == 'false'].copy()
+
     if notif_df.empty:
-        st.info("No notifications yet. Large transactions above your threshold will appear here.")
+        st.info("No new notifications 🎉")
     else:
-        # Sort: unread first, then newest first
+        # Sort: unread first, then newest first (note: notif_df now only contains unread)
         display_notif = notif_df.copy()
         display_notif['_unread_sort'] = (
             display_notif['is_read'].astype(str).str.lower() == 'false'
@@ -590,6 +601,7 @@ else:
 
 st.markdown("---")
 
+# ─────────────────────────────────────────────
 # ─────────────────────────────────────────────
 # Sidebar: Chart & filter options
 # ─────────────────────────────────────────────
