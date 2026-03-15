@@ -3,11 +3,11 @@
 #   1. Daily line          — daily spend/credit with click-to-drilldown
 #   2. Monthly bars        — month-by-month grouped bars
 #   3. Top categories      — horizontal bar by category/merchant
-#   4. Weekly heatmap      — spend intensity by day-of-week × week (NEW)
-#   5. Cumulative spend    — running total across the month (NEW)
-#   6. Debit vs Credit pie — proportion of spend vs income (NEW)
-#   7. Bank breakdown      — stacked bar showing spend per bank per month (NEW)
-#   8. Day-of-week pattern — average spend by Mon–Sun (NEW)
+#   4. Weekly heatmap      — spend intensity by day-of-week × week
+#   5. Cumulative spend    — running total across the month
+#   6. Debit vs Credit pie — proportion of spend vs income
+#   7. Bank breakdown      — stacked bar showing spend per bank per month
+#   8. Day-of-week pattern — average spend by Mon–Sun
 
 import streamlit as st
 import pandas as pd
@@ -81,22 +81,23 @@ def render_chart(
     plot_df      = _filter_out_deleted(plot_df)      if plot_df      is not None else pd.DataFrame()
     converted_df = _filter_out_deleted(converted_df) if converted_df is not None else pd.DataFrame()
 
-    if plot_df.empty and chart_type not in ("Weekly heatmap", "Debit vs Credit pie",
-                                             "Bank breakdown", "Day-of-week pattern"):
+    if plot_df.empty and chart_type not in (
+        "Weekly heatmap", "Debit vs Credit pie", "Bank breakdown", "Day-of-week pattern"
+    ):
         st.info("No aggregated data available for charting.")
         return
 
     chart_type = (chart_type or "").strip()
 
     dispatch = {
-        "Daily line":           lambda: _render_daily_line(plot_df, converted_df, series_selected, height),
-        "Monthly bars":         lambda: _render_monthly_bars(plot_df, series_selected, height),
+        "Daily line":             lambda: _render_daily_line(plot_df, converted_df, series_selected, height),
+        "Monthly bars":           lambda: _render_monthly_bars(plot_df, series_selected, height),
         "Top categories (Top-N)": lambda: _render_top_categories(converted_df, top_n, height),
-        "Weekly heatmap":       lambda: _render_weekly_heatmap(converted_df, height),
-        "Cumulative spend":     lambda: _render_cumulative_spend(plot_df, series_selected, height),
-        "Debit vs Credit pie":  lambda: _render_debit_credit_pie(converted_df, height),
-        "Bank breakdown":       lambda: _render_bank_breakdown(converted_df, height),
-        "Day-of-week pattern":  lambda: _render_dow_pattern(converted_df, height),
+        "Weekly heatmap":         lambda: _render_weekly_heatmap(converted_df, height),
+        "Cumulative spend":       lambda: _render_cumulative_spend(plot_df, series_selected, height),
+        "Debit vs Credit pie":    lambda: _render_debit_credit_pie(converted_df, height),
+        "Bank breakdown":         lambda: _render_bank_breakdown(converted_df, height),
+        "Day-of-week pattern":    lambda: _render_dow_pattern(converted_df, height),
     }
 
     fn = dispatch.get(chart_type)
@@ -107,7 +108,7 @@ def render_chart(
 
 
 # ─────────────────────────────────────────────────────────────
-# 1. Daily line  (existing, unchanged)
+# 1. Daily line
 # ─────────────────────────────────────────────────────────────
 
 def _render_daily_line(plot_df, converted_df, series_selected, height):
@@ -177,7 +178,7 @@ def _render_daily_line(plot_df, converted_df, series_selected, height):
 
 
 # ─────────────────────────────────────────────────────────────
-# 2. Monthly bars  (existing, unchanged)
+# 2. Monthly bars
 # ─────────────────────────────────────────────────────────────
 
 def _render_monthly_bars(plot_df, series_selected, height):
@@ -209,7 +210,7 @@ def _render_monthly_bars(plot_df, series_selected, height):
 
 
 # ─────────────────────────────────────────────────────────────
-# 3. Top categories  (existing, unchanged)
+# 3. Top categories
 # ─────────────────────────────────────────────────────────────
 
 def _render_top_categories(converted_df, top_n, height):
@@ -254,14 +255,12 @@ def _render_top_categories(converted_df, top_n, height):
 
 
 # ─────────────────────────────────────────────────────────────
-# 4. Weekly heatmap  (NEW)
-#    Rows = week number, Columns = Mon–Sun
-#    Color intensity = total spend that day
+# 4. Weekly heatmap  ← UPDATED
+#    - Month filter selectbox sits RIGHT ABOVE the chart
+#    - Green = low spend, Red = high spend
 # ─────────────────────────────────────────────────────────────
 
 def _render_weekly_heatmap(converted_df, height):
-    st.markdown("##### 🗓️ Weekly Spend Heatmap — intensity shows how much you spent each day")
-
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available for heatmap.")
         return
@@ -283,39 +282,115 @@ def _render_weekly_heatmap(converted_df, height):
         st.info("No debit transactions to display.")
         return
 
-    df['Date']       = df['_ts'].dt.normalize()
-    df['DayOfWeek']  = df['_ts'].dt.day_name()          # Monday … Sunday
-    df['WeekStart']  = df['_ts'].dt.to_period('W').apply(lambda p: p.start_time.strftime('%Y-%m-%d'))
+    # ── Month filter — sits directly above the heatmap ───────────────────
+    df['_ym'] = df['_ts'].dt.to_period('M').astype(str)
+    available_months = sorted(df['_ym'].unique(), reverse=True)
+
+    filter_col, _ = st.columns([2, 4])
+    with filter_col:
+        chosen_month = st.selectbox(
+            "📅 Select Month",
+            options=available_months,
+            index=0,                      # default = most recent month
+            key="heatmap_month_filter",
+        )
+
+    df = df[df['_ym'] == chosen_month]
+
+    if df.empty:
+        st.info(f"No debit transactions for {chosen_month}.")
+        return
+
+    # ── Build heatmap data ────────────────────────────────────────────────
+    df['DayOfWeek'] = df['_ts'].dt.day_name()
+    df['WeekStart'] = df['_ts'].dt.to_period('W').apply(
+        lambda p: p.start_time.strftime('%Y-%m-%d')
+    )
 
     daily = df.groupby(['WeekStart', 'DayOfWeek'])['Amount_numeric'].sum().reset_index()
     daily.columns = ['Week', 'Day', 'Spend']
 
-    day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    day_order  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     week_order = sorted(daily['Week'].unique())
 
-    chart = alt.Chart(daily).mark_rect().encode(
-        x=alt.X('Day:O',  sort=day_order,  title='Day of Week',
-                axis=alt.Axis(labelAngle=0)),
-        y=alt.Y('Week:O', sort=week_order, title='Week starting'),
-        color=alt.Color('Spend:Q',
-                        scale=alt.Scale(scheme='orangered'),
-                        title='₹ Spend'),
+    # ── Chart: green (low) → red (high) ──────────────────────────────────
+    chart = alt.Chart(daily).mark_rect(
+        cornerRadius=4,
+        stroke='white',
+        strokeWidth=2,
+    ).encode(
+        x=alt.X(
+            'Day:O',
+            sort=day_order,
+            title='Day of Week',
+            axis=alt.Axis(labelAngle=0, labelFontSize=12),
+        ),
+        y=alt.Y(
+            'Week:O',
+            sort=week_order,
+            title='Week Starting',
+            axis=alt.Axis(labelFontSize=11),
+        ),
+        color=alt.Color(
+            'Spend:Q',
+            title='₹ Spent',
+            scale=alt.Scale(
+                scheme='redyellowgreen',  # green = low, yellow = mid, red = high
+                reverse=True,            # flip so HIGH spend = RED
+            ),
+            legend=alt.Legend(
+                title='₹ Spent',
+                gradientLength=120,
+                labelFontSize=11,
+            ),
+        ),
         tooltip=[
             alt.Tooltip('Week:O',  title='Week of'),
             alt.Tooltip('Day:O',   title='Day'),
             alt.Tooltip('Spend:Q', title='₹ Spent', format=',.0f'),
         ],
     ).properties(
-        height=max(200, min(600, 30 * len(week_order))),
+        height=max(160, min(400, 70 * len(week_order))),
+        title=alt.TitleParams(
+            text=f"Weekly Spend Heatmap — {chosen_month}",
+            fontSize=14,
+            anchor='start',
+        ),
     )
 
-    st.altair_chart(chart, use_container_width=True)
+    # ── Day-total text labels inside each cell ────────────────────────────
+    text = alt.Chart(daily).mark_text(
+        fontSize=11,
+        fontWeight='bold',
+        color='black',
+    ).encode(
+        x=alt.X('Day:O',  sort=day_order),
+        y=alt.Y('Week:O', sort=week_order),
+        text=alt.Text('Spend:Q', format=',.0f'),
+        opacity=alt.condition(
+            alt.datum.Spend > 0,
+            alt.value(0.75),
+            alt.value(0),              # hide zero-spend cells
+        ),
+    )
+
+    st.altair_chart((chart + text), use_container_width=True)
+
+    # ── Summary row below the chart ───────────────────────────────────────
+    total_spend  = daily['Spend'].sum()
+    peak_row     = daily.loc[daily['Spend'].idxmax()]
+    peak_day     = peak_row['Day']
+    peak_week    = peak_row['Week']
+    peak_amount  = peak_row['Spend']
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Total Debit",   f"₹{total_spend:,.0f}")
+    s2.metric("Peak Day",      peak_day)
+    s3.metric("Peak Amount",   f"₹{peak_amount:,.0f}", f"Week of {peak_week}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 5. Cumulative spend  (NEW)
-#    Running total of spend within a selected month
-#    Shows how fast you burn through your budget day by day
+# 5. Cumulative spend
 # ─────────────────────────────────────────────────────────────
 
 def _render_cumulative_spend(plot_df, series_selected, height):
@@ -329,7 +404,6 @@ def _render_cumulative_spend(plot_df, series_selected, height):
     df['YearMonth'] = df['Date'].dt.to_period('M').astype(str)
     months_available = sorted(df['YearMonth'].unique(), reverse=True)
 
-    # Let user pick which months to overlay (default: last 3)
     selected_months = st.multiselect(
         "Months to compare",
         options=months_available,
@@ -343,7 +417,6 @@ def _render_cumulative_spend(plot_df, series_selected, height):
     df = df[df['YearMonth'].isin(selected_months)].copy()
     df['Day'] = df['Date'].dt.day
 
-    # Cumsum per month
     rows = []
     for ym, grp in df.groupby('YearMonth'):
         grp = grp.sort_values('Day')
@@ -366,8 +439,7 @@ def _render_cumulative_spend(plot_df, series_selected, height):
 
 
 # ─────────────────────────────────────────────────────────────
-# 6. Debit vs Credit pie  (NEW)
-#    Overall proportion of money out vs money in
+# 6. Debit vs Credit pie
 # ─────────────────────────────────────────────────────────────
 
 def _render_debit_credit_pie(converted_df, height):
@@ -393,7 +465,6 @@ def _render_debit_credit_pie(converted_df, height):
         st.info("No data to display.")
         return
 
-    # Altair arc chart (pie)
     chart = alt.Chart(summary).mark_arc(outerRadius=130).encode(
         theta=alt.Theta('Total:Q'),
         color=alt.Color('Type:N', scale=TYPE_SCALE, title='Type'),
@@ -411,7 +482,6 @@ def _render_debit_credit_pie(converted_df, height):
 
     st.altair_chart(chart + text, use_container_width=True)
 
-    # Summary table below the pie
     total = summary['Total'].sum()
     for _, row in summary.iterrows():
         pct = row['Total'] / total * 100 if total else 0
@@ -419,8 +489,7 @@ def _render_debit_credit_pie(converted_df, height):
 
 
 # ─────────────────────────────────────────────────────────────
-# 7. Bank breakdown  (NEW)
-#    Stacked bar: how much was debited from each bank each month
+# 7. Bank breakdown
 # ─────────────────────────────────────────────────────────────
 
 def _render_bank_breakdown(converted_df, height):
@@ -467,8 +536,7 @@ def _render_bank_breakdown(converted_df, height):
 
 
 # ─────────────────────────────────────────────────────────────
-# 8. Day-of-week pattern  (NEW)
-#    Average spend by day of week — reveals habitual spend days
+# 8. Day-of-week pattern
 # ─────────────────────────────────────────────────────────────
 
 def _render_dow_pattern(converted_df, height):
@@ -498,8 +566,7 @@ def _render_dow_pattern(converted_df, height):
     df['DayOfWeek'] = df['_ts'].dt.day_name()
     df['Date']      = df['_ts'].dt.normalize()
 
-    # Sum per day, then average across all occurrences of that weekday
-    daily  = df.groupby(['Date', 'DayOfWeek'])['Amount_numeric'].sum().reset_index()
+    daily      = df.groupby(['Date', 'DayOfWeek'])['Amount_numeric'].sum().reset_index()
     avg_by_dow = daily.groupby('DayOfWeek')['Amount_numeric'].mean().reset_index()
     avg_by_dow.columns = ['Day', 'Avg_Spend']
 
@@ -523,7 +590,6 @@ def _render_dow_pattern(converted_df, height):
         ],
     ).properties(height=height)
 
-    # Overlay average line
     avg_line = alt.Chart(
         pd.DataFrame({'avg': [avg_by_dow['Avg_Spend'].mean()]})
     ).mark_rule(color='red', strokeDash=[4, 4], strokeWidth=2).encode(
