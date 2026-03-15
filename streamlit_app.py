@@ -599,21 +599,19 @@ with st.sidebar:
         show_debit_chart  = st.checkbox("Show Debit on Chart",  value=True,  key="show_debit_chart")
         show_credit_chart = st.checkbox("Show Credit on Chart", value=True,  key="show_credit_chart")
         chart_type_select = st.selectbox(
-            "Chart Type",
-            [
-                "Daily line",
-                "Monthly bars",
-                "Top categories (Top-N)",
-                "Weekly heatmap",          # index=3 → default
-                "Cumulative spend",
-                "Debit vs Credit pie",
-                "Bank breakdown",
-                "Day-of-week pattern",
-            ],
-            index=3,                       # ← Weekly heatmap is default
-            key="chart_type_select",
-        )
-
+    "Chart Type",
+    [
+        "Daily line",
+        "Monthly bars",
+        "Weekly heatmap",          # index=2 → default
+        "Cumulative spend",
+        "Debit vs Credit pie",
+        "Bank breakdown",
+        "Day-of-week pattern",
+    ],
+    index=2,                       # ← Weekly heatmap is default
+    key="chart_type_select",
+)
         st.write("**Chart Date Filter**")
         try:
             with st.spinner("Calculating overall totals…"):
