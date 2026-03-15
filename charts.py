@@ -2,7 +2,7 @@
 # Charts available:
 #   1. Daily line          — daily spend/credit with click-to-drilldown
 #   2. Monthly bars        — month-by-month grouped bars
-#   3. Weekly heatmap      — spend intensity by day-of-week × week
+#   3. Weekly heatmap      — click a cell to drill into that day's transactions
 #   4. Cumulative spend    — running total across the month
 #   5. Debit vs Credit pie — proportion of spend vs income
 #   6. Bank breakdown      — stacked bar showing spend per bank per month
@@ -64,7 +64,6 @@ COLOR_CREDIT = '#2ca02c'
 COLOR_SCALE  = alt.Scale(domain=['Total_Spent', 'Total_Credit'], range=[COLOR_SPENT, COLOR_CREDIT])
 TYPE_SCALE   = alt.Scale(domain=['debit', 'credit'], range=[COLOR_SPENT, COLOR_CREDIT])
 
-# Bank breakdown colors — one distinct color per bank
 BANK_COLOR_RANGE = [
     '#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd',
     '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22',
@@ -73,6 +72,8 @@ BANK_COLOR_RANGE = [
 
 # ─────────────────────────────────────────────────────────────
 # Router
+# render_chart returns a selected_date string (or None)
+# Only Weekly heatmap returns a value — all others return None
 # ─────────────────────────────────────────────────────────────
 
 def render_chart(
@@ -82,7 +83,12 @@ def render_chart(
     series_selected: List[str],
     top_n: int = 5,
     height: int = 420,
-) -> None:
+) -> Optional[str]:
+    """
+    Renders the selected chart type.
+    Returns a selected date string (YYYY-MM-DD) when the user clicks
+    a heatmap cell, otherwise returns None.
+    """
     plot_df      = _filter_out_deleted(plot_df)      if plot_df      is not None else pd.DataFrame()
     converted_df = _filter_out_deleted(converted_df) if converted_df is not None else pd.DataFrame()
 
@@ -90,7 +96,7 @@ def render_chart(
         "Weekly heatmap", "Debit vs Credit pie", "Bank breakdown", "Day-of-week pattern"
     ):
         st.info("No aggregated data available for charting.")
-        return
+        return None
 
     chart_type = (chart_type or "").strip()
 
@@ -106,9 +112,10 @@ def render_chart(
 
     fn = dispatch.get(chart_type)
     if fn:
-        fn()
+        return fn()   # only heatmap returns a date string; rest return None
     else:
         st.error(f"Unknown chart type: {chart_type}")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -120,7 +127,7 @@ def _render_daily_line(plot_df, converted_df, series_selected, height):
     vars_to_plot = [c for c in ['Total_Spent', 'Total_Credit'] if c in series_selected and c in df.columns]
     if not vars_to_plot:
         st.info("No series selected for plotting.")
-        return
+        return None
 
     long = df.melt(
         id_vars='Date', value_vars=vars_to_plot,
@@ -137,16 +144,16 @@ def _render_daily_line(plot_df, converted_df, series_selected, height):
         y=alt.Y('Amount:Q', title='Amount', axis=alt.Axis(format=",.0f")),
         color=alt.Color('Type:N', title='Type', scale=COLOR_SCALE),
         tooltip=[
-            alt.Tooltip('Date:T',     title='Date',   format='%Y-%m-%d'),
-            alt.Tooltip('Type:N',     title='Type'),
-            alt.Tooltip('Amount:Q',   title='Amount', format=','),
+            alt.Tooltip('Date:T',   title='Date',   format='%Y-%m-%d'),
+            alt.Tooltip('Type:N',   title='Type'),
+            alt.Tooltip('Amount:Q', title='Amount', format=','),
         ],
         opacity=alt.condition(date_sel, alt.value(1.0), alt.value(0.8)),
     ).add_params(date_sel).interactive()
 
     if converted_df is None or converted_df.empty:
         st.altair_chart(base.properties(height=height), use_container_width=True)
-        return
+        return None
 
     tx = converted_df.copy()
     if 'timestamp' in tx.columns:
@@ -187,6 +194,7 @@ def _render_daily_line(plot_df, converted_df, series_selected, height):
         ).resolve_scale(color='independent'),
         use_container_width=True,
     )
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -203,7 +211,7 @@ def _render_monthly_bars(plot_df, series_selected, height):
     ]
     if not vars_to_plot:
         st.info("No series selected for plotting.")
-        return
+        return None
 
     agg  = df.groupby('YearMonth')[vars_to_plot].sum().reset_index()
     long = agg.melt(
@@ -225,25 +233,31 @@ def _render_monthly_bars(plot_df, series_selected, height):
     ).interactive()
 
     st.altair_chart(chart.properties(height=height), use_container_width=True)
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
 # 3. Weekly heatmap
-#    - Month filter sits directly above chart
+#    - Click a cell → returns that day's date string to caller
+#    - Clicked cell gets a white border highlight
 #    - Green = low spend, Red = high spend
 #    - Hover shows exact date
 # ─────────────────────────────────────────────────────────────
 
-def _render_weekly_heatmap(converted_df, height):
+def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
+    """
+    Renders the heatmap and returns the clicked date as 'YYYY-MM-DD',
+    or None if no cell has been clicked.
+    """
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available for heatmap.")
-        return
+        return None
 
     df = converted_df.copy()
     ts = 'timestamp' if 'timestamp' in df.columns else ('date' if 'date' in df.columns else None)
     if ts is None:
         st.info("No date column found for heatmap.")
-        return
+        return None
 
     df['_ts'] = pd.to_datetime(df[ts], errors='coerce')
     df = df.dropna(subset=['_ts'])
@@ -254,7 +268,7 @@ def _render_weekly_heatmap(converted_df, height):
 
     if df.empty:
         st.info("No debit transactions to display.")
-        return
+        return None
 
     # ── Month filter directly above chart ────────────────────────────────
     df['_ym'] = df['_ts'].dt.to_period('M').astype(str)
@@ -273,25 +287,25 @@ def _render_weekly_heatmap(converted_df, height):
 
     if df.empty:
         st.info(f"No debit transactions for {chosen_month}.")
-        return
+        return None
 
-    # ── Build heatmap data — include exact date per day ──────────────────
-    df['DayOfWeek'] = df['_ts'].dt.day_name()
-    df['WeekStart'] = df['_ts'].dt.to_period('W').apply(
+    # ── Build heatmap data ────────────────────────────────────────────────
+    df['DayOfWeek']  = df['_ts'].dt.day_name()
+    df['WeekStart']  = df['_ts'].dt.to_period('W').apply(
         lambda p: p.start_time.strftime('%Y-%m-%d')
     )
-    # Keep the actual calendar date for tooltip
-    df['ExactDate'] = df['_ts'].dt.strftime('%d %b %Y')   # e.g. "05 Jan 2026"
+    # Exact calendar date for tooltip AND for drilldown filtering
+    df['ExactDate']       = df['_ts'].dt.strftime('%d %b %Y')   # display: "05 Jan 2026"
+    df['ExactDateISO']    = df['_ts'].dt.strftime('%Y-%m-%d')   # filter:  "2026-01-05"
 
-    # Aggregate — carry ExactDate as the date for the day's first transaction
     daily = (
-        df.groupby(['WeekStart', 'DayOfWeek', 'ExactDate'])['Amount_numeric']
+        df.groupby(['WeekStart', 'DayOfWeek', 'ExactDate', 'ExactDateISO'])['Amount_numeric']
         .sum()
         .reset_index()
     )
-    daily.columns = ['Week', 'Day', 'Date', 'Spend']
+    daily.columns = ['Week', 'Day', 'Date', 'DateISO', 'Spend']
 
-    # In case multiple dates map to same week+day (shouldn't happen), keep max spend
+    # Drop duplicates — keep highest-spend row per week+day slot
     daily = (
         daily.sort_values('Spend', ascending=False)
              .drop_duplicates(subset=['Week', 'Day'])
@@ -301,8 +315,17 @@ def _render_weekly_heatmap(converted_df, height):
     day_order  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     week_order = sorted(daily['Week'].unique())
 
-    # ── Heatmap: green (low) → red (high) ────────────────────────────────
-    chart = alt.Chart(daily).mark_rect(
+    # ── Click selection on the heatmap cells ─────────────────────────────
+    click_sel = alt.selection_point(
+        name='cell_click',
+        fields=['DateISO'],
+        on='click',
+        clear='dblclick',       # double-click to deselect
+        empty=False,
+    )
+
+    # ── Heatmap rectangles ────────────────────────────────────────────────
+    heatmap = alt.Chart(daily).mark_rect(
         cornerRadius=4,
         stroke='white',
         strokeWidth=2,
@@ -324,7 +347,7 @@ def _render_weekly_heatmap(converted_df, height):
             title='₹ Spent',
             scale=alt.Scale(
                 scheme='redyellowgreen',
-                reverse=True,            # high spend = red, low spend = green
+                reverse=True,           # high = red, low = green
             ),
             legend=alt.Legend(
                 title='₹ Spent',
@@ -332,22 +355,26 @@ def _render_weekly_heatmap(converted_df, height):
                 labelFontSize=11,
             ),
         ),
+        # Highlight clicked cell with a thick orange border
+        stroke=alt.condition(click_sel, alt.value('#ff8c00'), alt.value('white')),
+        strokeWidth=alt.condition(click_sel, alt.value(3), alt.value(1)),
         tooltip=[
-            alt.Tooltip('Date:N',  title='Date'),        # ← exact date on hover
-            alt.Tooltip('Day:O',   title='Day'),
-            alt.Tooltip('Week:O',  title='Week of'),
-            alt.Tooltip('Spend:Q', title='₹ Spent', format=',.0f'),
+            alt.Tooltip('Date:N',    title='📅 Date'),
+            alt.Tooltip('Day:O',     title='Day'),
+            alt.Tooltip('Week:O',    title='Week of'),
+            alt.Tooltip('Spend:Q',   title='₹ Spent', format=',.0f'),
         ],
-    ).properties(
+    ).add_params(click_sel).properties(
         height=max(160, min(400, 70 * len(week_order))),
         title=alt.TitleParams(
-            text=f"Weekly Spend Heatmap — {chosen_month}",
-            fontSize=14,
+            text=f"Weekly Spend Heatmap — {chosen_month}  (click a cell to see transactions)",
+            fontSize=13,
             anchor='start',
+            color='#555',
         ),
     )
 
-    # ── Amount labels inside each cell ───────────────────────────────────
+    # ── Amount labels inside cells ────────────────────────────────────────
     text = alt.Chart(daily).mark_text(
         fontSize=11,
         fontWeight='bold',
@@ -363,9 +390,15 @@ def _render_weekly_heatmap(converted_df, height):
         ),
     )
 
-    st.altair_chart((chart + text), use_container_width=True)
+    # ── Render with on_select so Streamlit captures clicks ───────────────
+    event = st.altair_chart(
+        (heatmap + text),
+        use_container_width=True,
+        on_select="rerun",          # reruns the app when a cell is clicked
+        key="heatmap_chart",
+    )
 
-    # ── Summary metrics below chart ───────────────────────────────────────
+    # ── Summary metrics ───────────────────────────────────────────────────
     total_spend = daily['Spend'].sum()
     peak_row    = daily.loc[daily['Spend'].idxmax()]
 
@@ -373,6 +406,17 @@ def _render_weekly_heatmap(converted_df, height):
     s1.metric("Total Debit",  f"₹{total_spend:,.0f}")
     s2.metric("Peak Day",     peak_row['Day'])
     s3.metric("Peak Amount",  f"₹{peak_row['Spend']:,.0f}", f"{peak_row['Date']}")
+
+    # ── Extract clicked date from Altair event ────────────────────────────
+    try:
+        selection = event.selection.get('cell_click', {})
+        date_list = selection.get('DateISO', [])
+        if date_list:
+            return str(date_list[0])   # return 'YYYY-MM-DD' to caller
+    except Exception:
+        pass
+
+    return None   # nothing clicked
 
 
 # ─────────────────────────────────────────────────────────────
@@ -385,10 +429,10 @@ def _render_cumulative_spend(plot_df, series_selected, height):
     df = _ensure_date_col(plot_df, "Date").copy()
     if df.empty or 'Total_Spent' not in df.columns:
         st.info("No spend data available for cumulative chart.")
-        return
+        return None
 
-    df['YearMonth']      = df['Date'].dt.to_period('M').astype(str)
-    months_available     = sorted(df['YearMonth'].unique(), reverse=True)
+    df['YearMonth']  = df['Date'].dt.to_period('M').astype(str)
+    months_available = sorted(df['YearMonth'].unique(), reverse=True)
 
     selected_months = st.multiselect(
         "Months to compare",
@@ -398,9 +442,9 @@ def _render_cumulative_spend(plot_df, series_selected, height):
     )
     if not selected_months:
         st.info("Select at least one month.")
-        return
+        return None
 
-    df  = df[df['YearMonth'].isin(selected_months)].copy()
+    df    = df[df['YearMonth'].isin(selected_months)].copy()
     df['Day'] = df['Date'].dt.day
 
     rows = []
@@ -416,12 +460,13 @@ def _render_cumulative_spend(plot_df, series_selected, height):
         color=alt.Color('YearMonth:N', title='Month'),
         tooltip=[
             alt.Tooltip('YearMonth:N', title='Month'),
-            alt.Tooltip('Day:Q',        title='Day'),
+            alt.Tooltip('Day:Q',       title='Day'),
             alt.Tooltip('Cumulative:Q', title='₹ Total so far', format=',.0f'),
         ],
     ).interactive()
 
     st.altair_chart(chart.properties(height=height), use_container_width=True)
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -433,14 +478,14 @@ def _render_debit_credit_pie(converted_df, height):
 
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available.")
-        return
+        return None
 
     df = converted_df.copy()
     df['Amount_numeric'] = pd.to_numeric(df.get('Amount', 0), errors='coerce').fillna(0.0)
 
     if 'Type' not in df.columns:
         st.info("No Type column found.")
-        return
+        return None
 
     summary = (
         df.groupby(df['Type'].astype(str).str.lower().str.strip())['Amount_numeric']
@@ -451,7 +496,7 @@ def _render_debit_credit_pie(converted_df, height):
 
     if summary.empty:
         st.info("No data to display.")
-        return
+        return None
 
     chart = alt.Chart(summary).mark_arc(outerRadius=130).encode(
         theta=alt.Theta('Total:Q'),
@@ -474,11 +519,11 @@ def _render_debit_credit_pie(converted_df, height):
     for _, row in summary.iterrows():
         pct = row['Total'] / total * 100 if total else 0
         st.markdown(f"- **{row['Type'].title()}**: ₹{row['Total']:,.0f} &nbsp;({pct:.1f}%)")
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
-# 6. Bank breakdown  ← UPDATED colors
-#    Each bank gets a distinct color from BANK_COLOR_RANGE
+# 6. Bank breakdown
 # ─────────────────────────────────────────────────────────────
 
 def _render_bank_breakdown(converted_df, height):
@@ -486,13 +531,13 @@ def _render_bank_breakdown(converted_df, height):
 
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available.")
-        return
+        return None
 
     df = converted_df.copy()
     ts = 'timestamp' if 'timestamp' in df.columns else ('date' if 'date' in df.columns else None)
     if ts is None or 'Bank' not in df.columns:
         st.info("Bank or date column not found.")
-        return
+        return None
 
     df['_ts'] = pd.to_datetime(df[ts], errors='coerce')
     df = df.dropna(subset=['_ts'])
@@ -504,25 +549,20 @@ def _render_bank_breakdown(converted_df, height):
 
     if df.empty:
         st.info("No debit transactions found.")
-        return
+        return None
 
     agg = df.groupby(['YearMonth', 'Bank'])['Amount_numeric'].sum().reset_index()
     agg.columns = ['Month', 'Bank', 'Amount']
     month_order = sorted(agg['Month'].unique(), key=lambda x: pd.to_datetime(x + "-01"))
 
-    # Build a distinct color scale from the actual banks in the data
-    banks_in_data = sorted(agg['Bank'].unique().tolist())
+    banks_in_data    = sorted(agg['Bank'].unique().tolist())
     colors_for_banks = BANK_COLOR_RANGE[:len(banks_in_data)]
     bank_color_scale = alt.Scale(domain=banks_in_data, range=colors_for_banks)
 
     chart = alt.Chart(agg).mark_bar().encode(
         x=alt.X('Month:N',  sort=month_order, title='Month'),
         y=alt.Y('Amount:Q', title='₹ Debited', axis=alt.Axis(format=",.0f"), stack=True),
-        color=alt.Color(
-            'Bank:N',
-            title='Bank',
-            scale=bank_color_scale,        # ← distinct colors per bank
-        ),
+        color=alt.Color('Bank:N', title='Bank', scale=bank_color_scale),
         tooltip=[
             alt.Tooltip('Month:N',  title='Month'),
             alt.Tooltip('Bank:N',   title='Bank'),
@@ -531,10 +571,11 @@ def _render_bank_breakdown(converted_df, height):
     ).interactive()
 
     st.altair_chart(chart.properties(height=height), use_container_width=True)
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
-# 7. Day-of-week pattern  ← FIXED alt.condition crash
+# 7. Day-of-week pattern
 # ─────────────────────────────────────────────────────────────
 
 def _render_dow_pattern(converted_df, height):
@@ -542,13 +583,13 @@ def _render_dow_pattern(converted_df, height):
 
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available.")
-        return
+        return None
 
     df = converted_df.copy()
     ts = 'timestamp' if 'timestamp' in df.columns else ('date' if 'date' in df.columns else None)
     if ts is None:
         st.info("No date column found.")
-        return
+        return None
 
     df['_ts'] = pd.to_datetime(df[ts], errors='coerce')
     df = df.dropna(subset=['_ts'])
@@ -559,7 +600,7 @@ def _render_dow_pattern(converted_df, height):
 
     if df.empty:
         st.info("No debit transactions found.")
-        return
+        return None
 
     df['DayOfWeek'] = df['_ts'].dt.day_name()
     df['Date']      = df['_ts'].dt.normalize()
@@ -570,12 +611,12 @@ def _render_dow_pattern(converted_df, height):
 
     day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 
-    # ── Assign weekend flag as a column so we avoid nested alt.condition ─
+    # Weekend flag as a column — avoids nested alt.condition crash
     avg_by_dow['IsWeekend'] = avg_by_dow['Day'].isin(['Saturday', 'Sunday'])
 
     weekend_scale = alt.Scale(
         domain=[True, False],
-        range=['#e6550d', '#4c78a8'],    # orange for weekends, blue for weekdays
+        range=['#e6550d', '#4c78a8'],
     )
 
     bars = alt.Chart(avg_by_dow).mark_bar().encode(
@@ -604,7 +645,6 @@ def _render_dow_pattern(converted_df, height):
         ],
     ).properties(height=height)
 
-    # Overall average reference line
     avg_line = alt.Chart(
         pd.DataFrame({'avg': [avg_by_dow['Avg_Spend'].mean()]})
     ).mark_rule(
@@ -618,3 +658,4 @@ def _render_dow_pattern(converted_df, height):
 
     st.altair_chart((bars + avg_line).interactive(), use_container_width=True)
     st.caption("🟧 Weekends in orange · Red dashed line = overall average")
+    return None
