@@ -402,30 +402,36 @@ if st.session_state.get('show_notif_panel', False):
                         st.session_state['sample_notif_df']['is_seen'] = 'true'
                 st.rerun()
 
+    # ── Filter unseen and sort desc by created_at ─────────────────────────
     if not notif_df.empty and 'is_seen' in notif_df.columns:
-        display_notif['created_at'] = pd.to_datetime(display_notif['created_at'], errors='coerce')
-        display_notif = display_notif.sort_values('created_at', ascending=False).reset_index(drop=True)
+        display_notif = notif_df[
+            notif_df['is_seen'].astype(str).str.lower() == 'false'
+        ].copy()
+        display_notif['created_at'] = pd.to_datetime(
+            display_notif['created_at'], errors='coerce'
+        )
+        display_notif = display_notif.sort_values(
+            'created_at', ascending=False
+        ).reset_index(drop=True)
     else:
         display_notif = pd.DataFrame()
 
     if display_notif.empty:
         st.info("No new notifications 🎉")
     else:
-        display_notif = display_notif.sort_values('created_at', ascending=False).reset_index(drop=True)
-
         if '_expanded_notif_uid' not in st.session_state:
             st.session_state['_expanded_notif_uid'] = None
 
         for _, nrow in display_notif.iterrows():
-            n_uid      = nrow.get('uid', '')
-            n_ts       = nrow.get('timestamp', '')
-            n_bank     = nrow.get('bank', '')
-            n_amount   = float(nrow.get('amount', 0) or 0)
-            n_msg      = str(nrow.get('message', ''))[:80]
-            n_subtype  = nrow.get('subtype', '—')
+            n_uid       = nrow.get('uid', '')
+            n_ts        = nrow.get('timestamp', '')
+            n_bank      = nrow.get('bank', '')
+            n_amount    = float(nrow.get('amount', 0) or 0)
+            n_msg       = str(nrow.get('message', ''))[:80]
+            n_subtype   = nrow.get('subtype', '—')
             n_threshold = float(nrow.get('threshold', alert_threshold) or alert_threshold)
-            n_created  = nrow.get('created_at', '')
-            n_is_seen  = str(nrow.get('is_seen', 'false')).lower() == 'true'
+            n_created   = nrow.get('created_at', '')
+            n_is_seen   = str(nrow.get('is_seen', 'false')).lower() == 'true'
             is_expanded = st.session_state['_expanded_notif_uid'] == n_uid
 
             bg_color = "#f8f9fa" if n_is_seen else "#fff8f8"
@@ -439,7 +445,7 @@ if st.session_state.get('show_notif_panel', False):
                     f"""<div style="background:{bg_color};border:1px solid {border};
                         border-radius:8px;padding:10px 14px;margin-bottom:2px;">
                         {dot} <b>₹{n_amount:,.0f}</b> &nbsp;·&nbsp;
-                        <b>{n_bank}</b> &nbsp;·&nbsp; {n_ts[:16]}
+                        <b>{n_bank}</b> &nbsp;·&nbsp; {str(n_ts)[:16]}
                         <br><small style="color:#666">{n_msg}</small>
                     </div>""",
                     unsafe_allow_html=True,
@@ -1157,22 +1163,3 @@ try:
             sel_df['type_norm'] = sel_df[type_col].astype(str).str.lower().str.strip()
             credit_mask  = sel_df['type_norm'] == 'credit'
             debit_mask   = sel_df['type_norm'] == 'debit'
-            credit_sum   = float(sel_df.loc[credit_mask, amount_col].sum())
-            debit_sum    = float(sel_df.loc[debit_mask,  amount_col].sum())
-            credit_count = int(credit_mask.sum())
-            debit_count  = int(debit_mask.sum())
-        else:
-            for _, r in sel_df.iterrows():
-                amt = r[amount_col]
-                if amt < 0: credit_sum += abs(amt); credit_count += 1
-                else:        debit_sum  += amt;      debit_count  += 1
-    else:
-        st.warning("Cannot calculate totals: 'Amount' column not found.")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Credits",  f"₹{credit_sum:,.0f}",             f"{credit_count} txns")
-    col2.metric("Debits",   f"₹{debit_sum:,.0f}",              f"{debit_count} txns")
-    col3.metric("Net Flow", f"₹{(credit_sum - debit_sum):,.0f}")
-
-except Exception as e:
-    st.error(f"Failed to compute totals: {e}")
