@@ -2,7 +2,7 @@
 # Charts available:
 #   1. Daily line          — daily spend/credit with click-to-drilldown
 #   2. Monthly bars        — month-by-month grouped bars
-#   3. Weekly heatmap      — click a cell to drill into that day's transactions
+#   3. Weekly heatmap      — select a day to drill into transactions
 #   4. Cumulative spend    — running total across the month
 #   5. Debit vs Credit pie — proportion of spend vs income
 #   6. Bank breakdown      — stacked bar showing spend per bank per month
@@ -86,8 +86,8 @@ def render_chart(
 ) -> Optional[str]:
     """
     Renders the selected chart type.
-    Returns a selected date string (YYYY-MM-DD) when the user clicks
-    a heatmap cell, otherwise returns None.
+    Returns a selected date string (YYYY-MM-DD) when the user picks
+    a day from the heatmap drilldown selectbox, otherwise returns None.
     """
     plot_df      = _filter_out_deleted(plot_df)      if plot_df      is not None else pd.DataFrame()
     converted_df = _filter_out_deleted(converted_df) if converted_df is not None else pd.DataFrame()
@@ -238,16 +238,17 @@ def _render_monthly_bars(plot_df, series_selected, height):
 
 # ─────────────────────────────────────────────────────────────
 # 3. Weekly heatmap
-#    - Click a cell → returns that day's date string to caller
-#    - Clicked cell gets an orange border highlight
+#    - Month filter sits directly above chart
 #    - Green = low spend, Red = high spend
 #    - Hover shows exact date
+#    - Selectbox below chart to drill into a specific day
 # ─────────────────────────────────────────────────────────────
 
 def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     """
-    Renders the heatmap and returns the clicked date as 'YYYY-MM-DD',
-    or None if no cell has been clicked.
+    Renders the heatmap.
+    Returns the selected date as 'YYYY-MM-DD' from the selectbox below,
+    or None if no date selected.
     """
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available for heatmap.")
@@ -294,8 +295,8 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     df['WeekStart'] = df['_ts'].dt.to_period('W').apply(
         lambda p: p.start_time.strftime('%Y-%m-%d')
     )
-    df['ExactDate']    = df['_ts'].dt.strftime('%d %b %Y')   # display:  "05 Jan 2026"
-    df['ExactDateISO'] = df['_ts'].dt.strftime('%Y-%m-%d')   # filter:   "2026-01-05"
+    df['ExactDate']    = df['_ts'].dt.strftime('%d %b %Y')   # display: "05 Jan 2026"
+    df['ExactDateISO'] = df['_ts'].dt.strftime('%Y-%m-%d')   # filter:  "2026-01-05"
 
     daily = (
         df.groupby(['WeekStart', 'DayOfWeek', 'ExactDate', 'ExactDateISO'])['Amount_numeric']
@@ -304,7 +305,7 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     )
     daily.columns = ['Week', 'Day', 'Date', 'DateISO', 'Spend']
 
-    # Keep highest-spend row per week+day slot (avoids duplicates)
+    # Keep highest-spend row per week+day slot
     daily = (
         daily.sort_values('Spend', ascending=False)
              .drop_duplicates(subset=['Week', 'Day'])
@@ -314,18 +315,11 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     day_order  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     week_order = sorted(daily['Week'].unique())
 
-    # ── Click selection ───────────────────────────────────────────────────
-    click_sel = alt.selection_point(
-        name='cell_click',
-        fields=['DateISO'],
-        on='click',
-        clear='dblclick',
-        empty=False,
-    )
-
     # ── Heatmap rectangles ────────────────────────────────────────────────
     heatmap = alt.Chart(daily).mark_rect(
         cornerRadius=4,
+        stroke='white',
+        strokeWidth=2,
     ).encode(
         x=alt.X(
             'Day:O',
@@ -352,26 +346,16 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
                 labelFontSize=11,
             ),
         ),
-        stroke=alt.condition(
-            click_sel,
-            alt.value('#ff8c00'),   # orange border on clicked cell
-            alt.value('white'),
-        ),
-        strokeWidth=alt.condition(
-            click_sel,
-            alt.value(3),
-            alt.value(1),
-        ),
         tooltip=[
             alt.Tooltip('Date:N',  title='📅 Date'),
             alt.Tooltip('Day:O',   title='Day'),
             alt.Tooltip('Week:O',  title='Week of'),
             alt.Tooltip('Spend:Q', title='₹ Spent', format=',.0f'),
         ],
-    ).add_params(click_sel).properties(
+    ).properties(
         height=max(160, min(400, 70 * len(week_order))),
         title=alt.TitleParams(
-            text=f"Weekly Spend Heatmap — {chosen_month}  (click a cell to see transactions)",
+            text=f"Weekly Spend Heatmap — {chosen_month}",
             fontSize=13,
             anchor='start',
             color='#555',
@@ -394,13 +378,8 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
         ),
     )
 
-    # ── Render with on_select so Streamlit captures clicks ───────────────
-    event = st.altair_chart(
-        (heatmap + text),
-        use_container_width=True,
-        on_select="rerun",
-        key="heatmap_chart",
-    )
+    # ── Render chart ─────────────────────────────────────────────────────
+    st.altair_chart((heatmap + text), use_container_width=True)
 
     # ── Summary metrics below chart ───────────────────────────────────────
     total_spend = daily['Spend'].sum()
@@ -411,16 +390,36 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     s2.metric("Peak Day",     peak_row['Day'])
     s3.metric("Peak Amount",  f"₹{peak_row['Spend']:,.0f}", f"{peak_row['Date']}")
 
-    # ── Extract clicked date from Altair selection event ─────────────────
-    try:
-        selection = event.selection.get('cell_click', {})
-        date_list = selection.get('DateISO', [])
-        if date_list:
-            return str(date_list[0])
-    except Exception:
-        pass
+    # ── Day drilldown selectbox ───────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🔍 Drill into a specific day")
 
-    return None
+    # Build options: "05 Jan 2026  —  Monday  —  ₹2,500" sorted newest first
+    daily_sorted = daily.sort_values('DateISO', ascending=False).reset_index(drop=True)
+    date_options = {
+        f"{row['Date']}  —  {row['Day']}  —  ₹{row['Spend']:,.0f}": row['DateISO']
+        for _, row in daily_sorted.iterrows()
+        if row['Spend'] > 0
+    }
+
+    if not date_options:
+        st.info("No transaction days available to drill into.")
+        return None
+
+    none_label  = "— Select a day to see transactions —"
+    all_labels  = [none_label] + list(date_options.keys())
+
+    picked_label = st.selectbox(
+        "Pick a day",
+        options=all_labels,
+        index=0,
+        key="heatmap_day_picker",
+    )
+
+    if picked_label == none_label:
+        return None
+
+    return date_options[picked_label]   # returns 'YYYY-MM-DD'
 
 
 # ─────────────────────────────────────────────────────────────
