@@ -403,7 +403,8 @@ if st.session_state.get('show_notif_panel', False):
                 st.rerun()
 
     if not notif_df.empty and 'is_seen' in notif_df.columns:
-        display_notif = notif_df[notif_df['is_seen'].astype(str).str.lower() == 'false'].copy()
+        display_notif['created_at'] = pd.to_datetime(display_notif['created_at'], errors='coerce')
+        display_notif = display_notif.sort_values('created_at', ascending=False).reset_index(drop=True)
     else:
         display_notif = pd.DataFrame()
 
