@@ -1,20 +1,19 @@
 # notifications.py — Google Sheet-backed persistent notification store
 #
 # Sheet layout (tab name: "Notifications"):
-#   uid | timestamp | bank | amount | message | subtype | threshold | is_read | created_at
+#   uid | timestamp | bank | amount | message | subtype | threshold | is_seen | created_at
 #
 # uid = stable hash of (transaction timestamp + bank + amount + message)
-# is_read = "false" / "true"  (string, for Sheets compatibility)
+# is_seen = "false" / "true"  (string, for Sheets compatibility)
 
 import hashlib
-import json
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
 NOTIF_SHEET = "Notifications"
-NOTIF_COLS  = ["uid", "timestamp", "bank", "amount", "message", "subtype", "threshold", "is_read", "created_at"]
+NOTIF_COLS  = ["uid", "timestamp", "bank", "amount", "message", "subtype", "threshold", "is_seen", "created_at"]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -23,12 +22,17 @@ NOTIF_COLS  = ["uid", "timestamp", "bank", "amount", "message", "subtype", "thre
 
 def make_uid(row: dict) -> str:
     """Stable hash from timestamp + bank + amount + message."""
-    key = f"{row.get('timestamp','')}|{row.get('bank', row.get('Bank',''))}|{row.get('amount', row.get('Amount',''))}|{str(row.get('message', row.get('Message', row.get('description',''))))[:60]}"
+    key = (
+        f"{row.get('timestamp','')}|"
+        f"{row.get('bank', row.get('Bank',''))}|"
+        f"{row.get('amount', row.get('Amount',''))}|"
+        f"{str(row.get('message', row.get('Message', row.get('description',''))))[:60]}"
+    )
     return hashlib.md5(key.encode()).hexdigest()
 
 
 # ─────────────────────────────────────────────────────────────
-# Sheet I/O helpers (no @st.cache_data — caller caches if needed)
+# Google Sheets service builder
 # ─────────────────────────────────────────────────────────────
 
 def _get_write_service(creds_info=None, creds_file=None):
@@ -46,57 +50,115 @@ def _get_write_service(creds_info=None, creds_file=None):
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
+# ─────────────────────────────────────────────────────────────
+# Ensure Notifications sheet exists with correct header
+# ─────────────────────────────────────────────────────────────
+
 def _ensure_notif_sheet(spreadsheet_id: str, service) -> bool:
-    """Create the Notifications tab + header row if it doesn't exist. Returns True on success."""
+    """
+    - If Notifications tab does not exist → create it + write header
+    - If tab exists but is empty → write header
+    - If tab exists and has data → do nothing (preserve existing data)
+    Returns True on success.
+    """
     try:
         meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-        existing = [s['properties']['title'] for s in meta.get('sheets', [])]
-        if NOTIF_SHEET not in existing:
+        existing_tabs = [s['properties']['title'] for s in meta.get('sheets', [])]
+
+        if NOTIF_SHEET not in existing_tabs:
+            # Create the tab
             service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": [{"addSheet": {"properties": {"title": NOTIF_SHEET}}}]}
             ).execute()
-            # Write header
+            # Write header row
             service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=f"{NOTIF_SHEET}!A1",
                 valueInputOption="USER_ENTERED",
                 body={"values": [NOTIF_COLS]}
             ).execute()
+            print(f"[notifications] Created '{NOTIF_SHEET}' tab and wrote header.")
+        else:
+            # Tab exists — check if it has a header already
+            res = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{NOTIF_SHEET}!A1:Z1"
+            ).execute()
+            first_row = res.get("values", [])
+            if not first_row or not any(str(c).strip() for c in first_row[0]):
+                # Empty sheet — write header
+                service.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{NOTIF_SHEET}!A1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [NOTIF_COLS]}
+                ).execute()
+                print(f"[notifications] '{NOTIF_SHEET}' tab was empty — wrote header.")
+
         return True
+
     except Exception as e:
         print(f"[notifications] _ensure_notif_sheet error: {e}")
         return False
 
 
+# ─────────────────────────────────────────────────────────────
+# Read all notifications
+# ─────────────────────────────────────────────────────────────
+
 def read_notifications(spreadsheet_id: str, creds_info=None, creds_file=None) -> pd.DataFrame:
-    """Read all rows from the Notifications sheet. Returns empty DataFrame on failure."""
+    """
+    Read all rows from the Notifications sheet.
+    Returns empty DataFrame (with correct columns) on failure or empty sheet.
+    """
     try:
         svc = _get_write_service(creds_info, creds_file)
         _ensure_notif_sheet(spreadsheet_id, svc)
-        res = svc.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=NOTIF_SHEET
+
+        res    = svc.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=NOTIF_SHEET
         ).execute()
         values = res.get("values", [])
-        if len(values) <= 1:           # header only or empty
+
+        if len(values) <= 1:
+            # Only header or completely empty
             return pd.DataFrame(columns=NOTIF_COLS)
+
         header = [str(c).strip() for c in values[0]]
         rows   = values[1:]
-        # Pad short rows
+
+        # Pad short rows so every row has same column count as header
         rows = [r + [''] * (len(header) - len(r)) for r in rows]
+
         df = pd.DataFrame(rows, columns=header)
         return df
+
     except Exception as e:
         print(f"[notifications] read_notifications error: {e}")
         return pd.DataFrame(columns=NOTIF_COLS)
 
 
+# ─────────────────────────────────────────────────────────────
+# Write all notifications (full overwrite)
+# ─────────────────────────────────────────────────────────────
+
 def _write_all_notifications(spreadsheet_id: str, df: pd.DataFrame, svc) -> bool:
-    """Overwrite the entire Notifications sheet with df (including header)."""
+    """
+    Overwrite the entire Notifications sheet with df (header + all rows).
+    Ensures all NOTIF_COLS are present before writing.
+    """
     try:
+        # Make sure all required columns exist
+        for c in NOTIF_COLS:
+            if c not in df.columns:
+                df[c] = ''
+
         rows = [NOTIF_COLS] + df[NOTIF_COLS].fillna('').values.tolist()
-        # Convert every cell to string so Sheets API accepts it
+        # Convert every cell to string so Sheets API accepts it cleanly
         rows = [[str(c) for c in row] for row in rows]
+
         svc.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range=NOTIF_SHEET,
@@ -104,13 +166,14 @@ def _write_all_notifications(spreadsheet_id: str, df: pd.DataFrame, svc) -> bool
             body={"values": rows}
         ).execute()
         return True
+
     except Exception as e:
         print(f"[notifications] _write_all_notifications error: {e}")
         return False
 
 
 # ─────────────────────────────────────────────────────────────
-# Public API
+# CORE: Sync large transactions → Notifications sheet
 # ─────────────────────────────────────────────────────────────
 
 def sync_large_transactions(
@@ -121,9 +184,12 @@ def sync_large_transactions(
     creds_file=None,
 ) -> Tuple[int, int]:
     """
-    Detect debits > threshold in transactions_df.
-    For each one not already in the Notifications sheet, add it as is_read=false.
-    Returns (new_added, total_unread).
+    Scan ALL transactions for debits above threshold.
+    - First run (empty sheet): loads every qualifying transaction with is_seen = false
+    - Subsequent runs: only appends transactions whose UID is not already in the sheet
+    - Never creates duplicates (deduplication via UID)
+
+    Returns (new_added, total_unseen).
     """
     if transactions_df is None or transactions_df.empty:
         return 0, 0
@@ -132,30 +198,45 @@ def sync_large_transactions(
         svc = _get_write_service(creds_info, creds_file)
         _ensure_notif_sheet(spreadsheet_id, svc)
 
-        existing_df = read_notifications(spreadsheet_id, creds_info, creds_file)
+        # ── Read existing notifications to get known UIDs ──────────────────
+        existing_df   = read_notifications(spreadsheet_id, creds_info, creds_file)
         existing_uids = set(existing_df['uid'].tolist()) if not existing_df.empty else set()
 
-        # Filter large debits
+        # ── Filter: debit transactions above threshold ─────────────────────
         df = transactions_df.copy()
         df['Amount'] = pd.to_numeric(df.get('Amount'), errors='coerce')
+
         type_col = next((c for c in df.columns if c.lower() == 'type'), None)
         if type_col:
             debit_mask = df[type_col].astype(str).str.lower().str.strip() == 'debit'
         else:
             debit_mask = pd.Series(True, index=df.index)
+
         flagged = df[debit_mask & (df['Amount'] > threshold)]
 
+        if flagged.empty:
+            total_unseen = int(
+                (existing_df['is_seen'].astype(str).str.lower() == 'false').sum()
+            ) if not existing_df.empty and 'is_seen' in existing_df.columns else 0
+            return 0, total_unseen
+
+        # ── Build new rows (skip already-known UIDs) ───────────────────────
         new_rows = []
         for _, row in flagged.iterrows():
-            uid = make_uid(row.to_dict())
+            row_dict = row.to_dict()
+            uid      = make_uid(row_dict)
+
             if uid in existing_uids:
-                continue
-            ts  = pd.to_datetime(row.get('timestamp', ''), errors='coerce')
+                continue  # already recorded — skip
+
+            ts     = pd.to_datetime(row.get('timestamp', ''), errors='coerce')
             ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if pd.notna(ts) else ''
-            bank    = str(row.get('Bank', row.get('bank', 'Unknown')))
-            amount  = str(row.get('Amount', ''))
+
+            bank    = str(row.get('Bank',    row.get('bank',    'Unknown')))
+            amount  = str(row.get('Amount',  ''))
             message = str(row.get('message', row.get('Message', row.get('description', ''))))[:120]
             subtype = str(row.get('Subtype', row.get('subtype', '')))
+
             new_rows.append({
                 'uid':        uid,
                 'timestamp':  ts_str,
@@ -164,76 +245,114 @@ def sync_large_transactions(
                 'message':    message,
                 'subtype':    subtype,
                 'threshold':  str(threshold),
-                'is_read':    'false',
+                'is_seen':    'false',   # always false on first load
                 'created_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
             })
 
+        # ── Write to sheet if there are new rows ───────────────────────────
         if new_rows:
-            new_df     = pd.DataFrame(new_rows, columns=NOTIF_COLS)
-            combined   = pd.concat([existing_df, new_df], ignore_index=True)
-            # Ensure all NOTIF_COLS present
+            new_df   = pd.DataFrame(new_rows, columns=NOTIF_COLS)
+            combined = pd.concat([existing_df, new_df], ignore_index=True)
             for c in NOTIF_COLS:
                 if c not in combined.columns:
                     combined[c] = ''
             _write_all_notifications(spreadsheet_id, combined, svc)
+            print(f"[notifications] Added {len(new_rows)} new notification(s) to sheet.")
 
-        # Count total unread (re-read to include anything just added)
-        final_df   = read_notifications(spreadsheet_id, creds_info, creds_file)
-        total_unread = int((final_df['is_read'].astype(str).str.lower() == 'false').sum()) if not final_df.empty else 0
-        return len(new_rows), total_unread
+        # ── Count total unseen (re-read to be accurate) ───────────────────
+        final_df     = read_notifications(spreadsheet_id, creds_info, creds_file)
+        total_unseen = int(
+            (final_df['is_seen'].astype(str).str.lower() == 'false').sum()
+        ) if not final_df.empty and 'is_seen' in final_df.columns else 0
+
+        return len(new_rows), total_unseen
 
     except Exception as e:
         print(f"[notifications] sync_large_transactions error: {e}")
         return 0, 0
 
 
-def mark_notification_read(
+# ─────────────────────────────────────────────────────────────
+# Mark a single notification as seen
+# ─────────────────────────────────────────────────────────────
+
+def mark_notification_seen(
     spreadsheet_id: str,
     uid: str,
     creds_info=None,
     creds_file=None,
 ) -> bool:
-    """Mark a single notification as read by uid. Returns True on success."""
+    """
+    Set is_seen = true for the notification matching uid.
+    Called automatically when user opens/clicks a notification.
+    Returns True on success.
+    """
     try:
         svc = _get_write_service(creds_info, creds_file)
         df  = read_notifications(spreadsheet_id, creds_info, creds_file)
+
         if df.empty:
             return False
-        df.loc[df['uid'] == uid, 'is_read'] = 'true'
+
+        if uid not in df['uid'].values:
+            print(f"[notifications] UID not found: {uid}")
+            return False
+
+        df.loc[df['uid'] == uid, 'is_seen'] = 'true'
         return _write_all_notifications(spreadsheet_id, df, svc)
+
     except Exception as e:
-        print(f"[notifications] mark_notification_read error: {e}")
+        print(f"[notifications] mark_notification_seen error: {e}")
         return False
 
 
-def mark_all_read(
+# Backward-compatible alias
+mark_notification_read = mark_notification_seen
+
+
+# ─────────────────────────────────────────────────────────────
+# Mark ALL notifications as seen
+# ─────────────────────────────────────────────────────────────
+
+def mark_all_seen(
     spreadsheet_id: str,
     creds_info=None,
     creds_file=None,
 ) -> bool:
-    """Mark all notifications as read."""
+    """Set is_seen = true for every row in the Notifications sheet."""
     try:
         svc = _get_write_service(creds_info, creds_file)
         df  = read_notifications(spreadsheet_id, creds_info, creds_file)
+
         if df.empty:
             return True
-        df['is_read'] = 'true'
+
+        df['is_seen'] = 'true'
         return _write_all_notifications(spreadsheet_id, df, svc)
+
     except Exception as e:
-        print(f"[notifications] mark_all_read error: {e}")
+        print(f"[notifications] mark_all_seen error: {e}")
         return False
 
 
-def get_unread_count(
+# Backward-compatible alias
+mark_all_read = mark_all_seen
+
+
+# ─────────────────────────────────────────────────────────────
+# Get unseen count
+# ─────────────────────────────────────────────────────────────
+
+def get_unseen_count(
     spreadsheet_id: str,
     creds_info=None,
     creds_file=None,
 ) -> int:
-    """Return count of unread notifications."""
+    """Return the number of notifications where is_seen = false."""
     try:
         df = read_notifications(spreadsheet_id, creds_info, creds_file)
-        if df.empty:
+        if df.empty or 'is_seen' not in df.columns:
             return 0
-        return int((df['is_read'].astype(str).str.lower() == 'false').sum())
+        return int((df['is_seen'].astype(str).str.lower() == 'false').sum())
     except Exception:
         return 0
