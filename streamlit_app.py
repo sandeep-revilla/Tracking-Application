@@ -1163,3 +1163,22 @@ try:
             sel_df['type_norm'] = sel_df[type_col].astype(str).str.lower().str.strip()
             credit_mask  = sel_df['type_norm'] == 'credit'
             debit_mask   = sel_df['type_norm'] == 'debit'
+            credit_sum   = float(sel_df.loc[credit_mask, amount_col].sum())
+            debit_sum    = float(sel_df.loc[debit_mask,  amount_col].sum())
+            credit_count = int(credit_mask.sum())
+            debit_count  = int(debit_mask.sum())
+        else:
+            for _, r in sel_df.iterrows():
+                amt = r[amount_col]
+                if amt < 0: credit_sum += abs(amt); credit_count += 1
+                else:        debit_sum  += amt;      debit_count  += 1
+    else:
+        st.warning("Cannot calculate totals: 'Amount' column not found.")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Credits",  f"₹{credit_sum:,.0f}",             f"{credit_count} txns")
+    col2.metric("Debits",   f"₹{debit_sum:,.0f}",              f"{debit_count} txns")
+    col3.metric("Net Flow", f"₹{(credit_sum - debit_sum):,.0f}")
+
+except Exception as e:
+    st.error(f"Failed to compute totals: {e}")
