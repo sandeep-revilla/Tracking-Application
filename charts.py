@@ -112,7 +112,7 @@ def render_chart(
 
     fn = dispatch.get(chart_type)
     if fn:
-        return fn()   # only heatmap returns a date string; rest return None
+        return fn()
     else:
         st.error(f"Unknown chart type: {chart_type}")
         return None
@@ -239,7 +239,7 @@ def _render_monthly_bars(plot_df, series_selected, height):
 # ─────────────────────────────────────────────────────────────
 # 3. Weekly heatmap
 #    - Click a cell → returns that day's date string to caller
-#    - Clicked cell gets a white border highlight
+#    - Clicked cell gets an orange border highlight
 #    - Green = low spend, Red = high spend
 #    - Hover shows exact date
 # ─────────────────────────────────────────────────────────────
@@ -290,13 +290,12 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
         return None
 
     # ── Build heatmap data ────────────────────────────────────────────────
-    df['DayOfWeek']  = df['_ts'].dt.day_name()
-    df['WeekStart']  = df['_ts'].dt.to_period('W').apply(
+    df['DayOfWeek'] = df['_ts'].dt.day_name()
+    df['WeekStart'] = df['_ts'].dt.to_period('W').apply(
         lambda p: p.start_time.strftime('%Y-%m-%d')
     )
-    # Exact calendar date for tooltip AND for drilldown filtering
-    df['ExactDate']       = df['_ts'].dt.strftime('%d %b %Y')   # display: "05 Jan 2026"
-    df['ExactDateISO']    = df['_ts'].dt.strftime('%Y-%m-%d')   # filter:  "2026-01-05"
+    df['ExactDate']    = df['_ts'].dt.strftime('%d %b %Y')   # display:  "05 Jan 2026"
+    df['ExactDateISO'] = df['_ts'].dt.strftime('%Y-%m-%d')   # filter:   "2026-01-05"
 
     daily = (
         df.groupby(['WeekStart', 'DayOfWeek', 'ExactDate', 'ExactDateISO'])['Amount_numeric']
@@ -305,7 +304,7 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     )
     daily.columns = ['Week', 'Day', 'Date', 'DateISO', 'Spend']
 
-    # Drop duplicates — keep highest-spend row per week+day slot
+    # Keep highest-spend row per week+day slot (avoids duplicates)
     daily = (
         daily.sort_values('Spend', ascending=False)
              .drop_duplicates(subset=['Week', 'Day'])
@@ -315,20 +314,18 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     day_order  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     week_order = sorted(daily['Week'].unique())
 
-    # ── Click selection on the heatmap cells ─────────────────────────────
+    # ── Click selection ───────────────────────────────────────────────────
     click_sel = alt.selection_point(
         name='cell_click',
         fields=['DateISO'],
         on='click',
-        clear='dblclick',       # double-click to deselect
+        clear='dblclick',
         empty=False,
     )
 
     # ── Heatmap rectangles ────────────────────────────────────────────────
     heatmap = alt.Chart(daily).mark_rect(
         cornerRadius=4,
-        stroke='white',
-        strokeWidth=2,
     ).encode(
         x=alt.X(
             'Day:O',
@@ -347,7 +344,7 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
             title='₹ Spent',
             scale=alt.Scale(
                 scheme='redyellowgreen',
-                reverse=True,           # high = red, low = green
+                reverse=True,           # high spend = red, low spend = green
             ),
             legend=alt.Legend(
                 title='₹ Spent',
@@ -355,14 +352,21 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
                 labelFontSize=11,
             ),
         ),
-        # Highlight clicked cell with a thick orange border
-        stroke=alt.condition(click_sel, alt.value('#ff8c00'), alt.value('white')),
-        strokeWidth=alt.condition(click_sel, alt.value(3), alt.value(1)),
+        stroke=alt.condition(
+            click_sel,
+            alt.value('#ff8c00'),   # orange border on clicked cell
+            alt.value('white'),
+        ),
+        strokeWidth=alt.condition(
+            click_sel,
+            alt.value(3),
+            alt.value(1),
+        ),
         tooltip=[
-            alt.Tooltip('Date:N',    title='📅 Date'),
-            alt.Tooltip('Day:O',     title='Day'),
-            alt.Tooltip('Week:O',    title='Week of'),
-            alt.Tooltip('Spend:Q',   title='₹ Spent', format=',.0f'),
+            alt.Tooltip('Date:N',  title='📅 Date'),
+            alt.Tooltip('Day:O',   title='Day'),
+            alt.Tooltip('Week:O',  title='Week of'),
+            alt.Tooltip('Spend:Q', title='₹ Spent', format=',.0f'),
         ],
     ).add_params(click_sel).properties(
         height=max(160, min(400, 70 * len(week_order))),
@@ -394,11 +398,11 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     event = st.altair_chart(
         (heatmap + text),
         use_container_width=True,
-        on_select="rerun",          # reruns the app when a cell is clicked
+        on_select="rerun",
         key="heatmap_chart",
     )
 
-    # ── Summary metrics ───────────────────────────────────────────────────
+    # ── Summary metrics below chart ───────────────────────────────────────
     total_spend = daily['Spend'].sum()
     peak_row    = daily.loc[daily['Spend'].idxmax()]
 
@@ -407,16 +411,16 @@ def _render_weekly_heatmap(converted_df, height) -> Optional[str]:
     s2.metric("Peak Day",     peak_row['Day'])
     s3.metric("Peak Amount",  f"₹{peak_row['Spend']:,.0f}", f"{peak_row['Date']}")
 
-    # ── Extract clicked date from Altair event ────────────────────────────
+    # ── Extract clicked date from Altair selection event ─────────────────
     try:
         selection = event.selection.get('cell_click', {})
         date_list = selection.get('DateISO', [])
         if date_list:
-            return str(date_list[0])   # return 'YYYY-MM-DD' to caller
+            return str(date_list[0])
     except Exception:
         pass
 
-    return None   # nothing clicked
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -459,8 +463,8 @@ def _render_cumulative_spend(plot_df, series_selected, height):
         y=alt.Y('Cumulative:Q', title='Cumulative Spend (₹)', axis=alt.Axis(format=",.0f")),
         color=alt.Color('YearMonth:N', title='Month'),
         tooltip=[
-            alt.Tooltip('YearMonth:N', title='Month'),
-            alt.Tooltip('Day:Q',       title='Day'),
+            alt.Tooltip('YearMonth:N',  title='Month'),
+            alt.Tooltip('Day:Q',        title='Day'),
             alt.Tooltip('Cumulative:Q', title='₹ Total so far', format=',.0f'),
         ],
     ).interactive()
