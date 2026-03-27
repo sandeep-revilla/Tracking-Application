@@ -476,30 +476,132 @@ def _render_cumulative_spend(plot_df, series_selected, height):
 # 5. Debit vs Credit pie
 # ─────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────
+# 5. Debit vs Credit pie  (date-aware)
+# ─────────────────────────────────────────────────────────────
+
 def _render_debit_credit_pie(converted_df, height):
-    st.markdown("##### 🥧 Debit vs Credit — overall proportion")
+    st.markdown("##### 🥧 Debit vs Credit — filtered by date")
 
     if converted_df is None or converted_df.empty:
         st.info("No transaction data available.")
         return None
 
     df = converted_df.copy()
+
+    # ── Resolve timestamp column ──────────────────────────────────────────
+    ts_col = 'timestamp' if 'timestamp' in df.columns else (
+        'date' if 'date' in df.columns else None
+    )
+    if ts_col is None:
+        st.info("No date column found in data.")
+        return None
+
+    df['_ts'] = pd.to_datetime(df[ts_col], errors='coerce')
+    df = df.dropna(subset=['_ts'])
+    if df.empty:
+        st.info("No valid dates found.")
+        return None
+
     df['Amount_numeric'] = pd.to_numeric(df.get('Amount', 0), errors='coerce').fillna(0.0)
 
     if 'Type' not in df.columns:
-        st.info("No Type column found.")
+        st.info("No 'Type' column found.")
         return None
 
+    # ── Date filter controls ──────────────────────────────────────────────
+    overall_min = df['_ts'].min().date()
+    overall_max = df['_ts'].max().date()
+
+    filter_mode = st.radio(
+        "Filter by",
+        ["Day", "Month", "Year", "Range"],
+        index=1,
+        horizontal=True,
+        key="pie_filter_mode",
+    )
+
+    if filter_mode == "Day":
+        picked_day = st.date_input(
+            "Pick a day",
+            value=overall_max,
+            min_value=overall_min,
+            max_value=overall_max,
+            key="pie_day_pick",
+        )
+        mask = df['_ts'].dt.date == picked_day
+        label = picked_day.strftime("%d %b %Y")
+
+    elif filter_mode == "Month":
+        # Build sorted list of available YYYY-MM strings
+        df['_ym'] = df['_ts'].dt.to_period('M').astype(str)
+        available_months = sorted(df['_ym'].unique(), reverse=True)
+        chosen_month = st.selectbox(
+            "Pick a month",
+            options=available_months,
+            index=0,
+            key="pie_month_pick",
+        )
+        mask = df['_ym'] == chosen_month
+        label = chosen_month
+
+    elif filter_mode == "Year":
+        available_years = sorted(df['_ts'].dt.year.unique().tolist(), reverse=True)
+        chosen_year = st.selectbox(
+            "Pick a year",
+            options=[str(y) for y in available_years],
+            index=0,
+            key="pie_year_pick",
+        )
+        mask = df['_ts'].dt.year == int(chosen_year)
+        label = chosen_year
+
+    else:  # Range
+        col_from, col_to = st.columns(2)
+        with col_from:
+            range_start = st.date_input(
+                "From",
+                value=overall_min,
+                min_value=overall_min,
+                max_value=overall_max,
+                key="pie_range_start",
+            )
+        with col_to:
+            range_end = st.date_input(
+                "To",
+                value=overall_max,
+                min_value=overall_min,
+                max_value=overall_max,
+                key="pie_range_end",
+            )
+        if range_start > range_end:
+            range_start, range_end = range_end, range_start
+        mask = (df['_ts'].dt.date >= range_start) & (df['_ts'].dt.date <= range_end)
+        label = f"{range_start.strftime('%d %b %Y')} → {range_end.strftime('%d %b %Y')}"
+
+    # ── Apply date filter ─────────────────────────────────────────────────
+    filtered = df[mask].copy()
+
+    if filtered.empty:
+        st.info(f"No transactions found for: **{label}**")
+        return None
+
+    # ── Aggregate by type ─────────────────────────────────────────────────
     summary = (
-        df.groupby(df['Type'].astype(str).str.lower().str.strip())['Amount_numeric']
-        .sum().reset_index()
+        filtered
+        .groupby(filtered['Type'].astype(str).str.lower().str.strip())['Amount_numeric']
+        .sum()
+        .reset_index()
     )
     summary.columns = ['Type', 'Total']
     summary = summary[summary['Total'] > 0]
 
     if summary.empty:
-        st.info("No data to display.")
+        st.info("No data to display for the selected period.")
         return None
+
+    # ── Pie chart ─────────────────────────────────────────────────────────
+    st.markdown(f"**Period: {label}**")
 
     chart = alt.Chart(summary).mark_arc(outerRadius=130).encode(
         theta=alt.Theta('Total:Q'),
@@ -518,12 +620,23 @@ def _render_debit_credit_pie(converted_df, height):
 
     st.altair_chart(chart + text, use_container_width=True)
 
+    # ── Summary breakdown ─────────────────────────────────────────────────
     total = summary['Total'].sum()
+    txn_counts = (
+        filtered
+        .groupby(filtered['Type'].astype(str).str.lower().str.strip())
+        .size()
+        .to_dict()
+    )
     for _, row in summary.iterrows():
-        pct = row['Total'] / total * 100 if total else 0
-        st.markdown(f"- **{row['Type'].title()}**: ₹{row['Total']:,.0f} &nbsp;({pct:.1f}%)")
-    return None
+        pct   = row['Total'] / total * 100 if total else 0
+        count = txn_counts.get(row['Type'], 0)
+        st.markdown(
+            f"- **{row['Type'].title()}**: ₹{row['Total']:,.0f} "
+            f"&nbsp;({pct:.1f}%) &nbsp;·&nbsp; {count} txn{'s' if count != 1 else ''}"
+        )
 
+    return None
 
 # ─────────────────────────────────────────────────────────────
 # 6. Bank breakdown
