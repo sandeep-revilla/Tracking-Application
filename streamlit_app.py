@@ -1070,6 +1070,11 @@ if start_sel and end_sel and not rows_df['timestamp'].isnull().all():
         (rows_df['timestamp'].dt.date <= end_sel)
     ]
 
+# ─────────────────────────────────────────────
+# Build display_df — Balance column is already
+# present in rows_df from calculate_running_balance();
+# just select and rename the desired columns.
+# ─────────────────────────────────────────────
 _desired     = ['timestamp', 'bank', 'type', 'amount', 'Balance', 'subtype', 'message']
 col_map      = {c.lower(): c for c in rows_df.columns}
 display_cols = [col_map[d] for d in _desired if d in col_map]
@@ -1102,51 +1107,12 @@ if 'Timestamp' in display_df.columns:
 if 'timestamp' in rows_df.columns:
     rows_df = rows_df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
 
-# ─────────────────────────────────────────────
-# Running Total column
-# Cumulative debit spend across the filtered + date-selected rows
-# Debits add to the total, credits subtract from it
-# ─────────────────────────────────────────────
-if 'Amount' in display_df.columns and 'Type' in display_df.columns:
-    try:
-        # Work on a copy sorted oldest → newest for cumsum, then reverse back
-        rt_df = display_df.copy()
-        rt_df = rt_df.sort_values('Timestamp', ascending=True).reset_index(drop=True)
-
-        rt_df['_signed'] = rt_df.apply(
-            lambda r: float(r['Amount']) if str(r['Type']).lower() == 'debit'
-                      else -float(r['Amount']) if str(r['Type']).lower() == 'credit'
-                      else 0.0,
-            axis=1
-        )
-        rt_df['Running Total'] = rt_df['_signed'].cumsum()
-        rt_df = rt_df.drop(columns=['_signed'])
-
-        # Merge back into display_df (which is sorted newest first)
-        display_df = display_df.merge(
-            rt_df[['Timestamp', 'Running Total']],
-            on='Timestamp',
-            how='left',
-        )
-
-        # Insert Running Total after Amount
-        cols_list = list(display_df.columns)
-        if 'Running Total' in cols_list and 'Amount' in cols_list:
-            cols_list.remove('Running Total')
-            amt_idx = cols_list.index('Amount')
-            cols_list.insert(amt_idx + 1, 'Running Total')
-            display_df = display_df[cols_list]
-
-    except Exception:
-        pass  # if running total fails for any reason, continue without it
-
 col_config = {
-    "Amount":        st.column_config.NumberColumn(format="₹%.2f"),
-    "Running Total": st.column_config.NumberColumn(
-        format="₹%.2f",
-        help="Cumulative spend for this filtered view (debits add, credits subtract)"
+    "Amount":  st.column_config.NumberColumn(format="₹%.2f"),
+    "Balance": st.column_config.NumberColumn(
+        format="₹%.0f",
+        help="Running account balance after this transaction (from start balance in Balances sheet)",
     ),
-    "Balance":       st.column_config.NumberColumn(format="₹%.0f", help="Running account balance after this transaction"),
 }
 
 if can_delete:
@@ -1158,10 +1124,9 @@ if can_delete:
         use_container_width=True,
         height=420,
         column_config={
-            "🗑️ Select":    st.column_config.CheckboxColumn("🗑️", help="Tick to mark for deletion", default=False),
-            "Amount":        st.column_config.NumberColumn(format="₹%.2f"),
-            "Running Total": st.column_config.NumberColumn(format="₹%.2f"),
-            "Balance":       st.column_config.NumberColumn(format="₹%.0f"),
+            "🗑️ Select": st.column_config.CheckboxColumn("🗑️", help="Tick to mark for deletion", default=False),
+            "Amount":    st.column_config.NumberColumn(format="₹%.2f"),
+            "Balance":   st.column_config.NumberColumn(format="₹%.0f"),
         },
         disabled=disabled_cols,
         hide_index=True,
