@@ -394,7 +394,6 @@ if st.session_state.get('show_notif_panel', False):
     with mark_all_col:
         btn1, btn2, btn3 = st.columns(3)
 
-        # ── Mark all as seen ─────────────────────────────────────────────
         with btn1:
             if unseen_count > 0:
                 if st.button("✅ Mark all seen", key="mark_all_seen_btn", use_container_width=True):
@@ -406,14 +405,12 @@ if st.session_state.get('show_notif_panel', False):
                             st.session_state['sample_notif_df']['is_seen'] = 'true'
                     st.rerun()
 
-        # ── Hard delete all ───────────────────────────────────────────────
         with btn2:
             if use_google and notif_mod and SHEET_ID:
                 if st.button("🗑️ Delete All", key="delete_all_notif_btn",
                              use_container_width=True, type="primary"):
                     st.session_state['_show_delete_all_notif_popup'] = True
 
-        # ── Reload from threshold ─────────────────────────────────────────
         with btn3:
             if use_google and notif_mod and SHEET_ID:
                 if st.button(f"🔄 Reload ₹{int(alert_threshold):,}", key="reload_notif_btn",
@@ -750,6 +747,26 @@ with st.sidebar:
         banks_available = sorted([b for b in converted_df_with_balance['Bank'].unique() if pd.notna(b)])
         sel_banks = st.multiselect("Bank(s)", options=banks_available, default=banks_available, key="sel_banks")
         sel_types = st.multiselect("Transaction Type(s)", options=["debit", "credit"], default=["debit", "credit"], key="sel_types")
+
+        # ── Subtype filter ────────────────────────────────────────────────
+        _subtype_col = next((c for c in converted_df_with_balance.columns if c.lower() == 'subtype'), None)
+        if _subtype_col:
+            _all_subtypes = sorted([
+                s for s in converted_df_with_balance[_subtype_col].dropna().unique()
+                if str(s).strip() not in ('', 'nan', 'None')
+            ])
+        else:
+            _all_subtypes = []
+        if _all_subtypes:
+            sel_subtypes = st.multiselect(
+                "Subtype(s)",
+                options=_all_subtypes,
+                default=_all_subtypes,
+                key="sel_subtypes",
+            )
+        else:
+            sel_subtypes = []
+
         min_amount_filter = st.number_input("Amount >= (0 to disable)", min_value=0.0, value=0.0, step=100.0, format="%.2f", key="min_amount_filter")
 
         st.markdown("---")
@@ -795,6 +812,13 @@ type_col_name = next((c for c in converted_df_filtered.columns if c.lower() == '
 if sel_types and type_col_name:
     converted_df_filtered = converted_df_filtered[
         converted_df_filtered[type_col_name].astype(str).str.lower().isin(sel_types)
+    ]
+
+# ── Subtype filter ────────────────────────────────────────────────────────
+subtype_col_name = next((c for c in converted_df_filtered.columns if c.lower() == 'subtype'), None)
+if sel_subtypes and subtype_col_name and _all_subtypes:
+    converted_df_filtered = converted_df_filtered[
+        converted_df_filtered[subtype_col_name].astype(str).isin(sel_subtypes)
     ]
 
 if min_amount_filter > 0.0:
@@ -1078,9 +1102,51 @@ if 'Timestamp' in display_df.columns:
 if 'timestamp' in rows_df.columns:
     rows_df = rows_df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
 
+# ─────────────────────────────────────────────
+# Running Total column
+# Cumulative debit spend across the filtered + date-selected rows
+# Debits add to the total, credits subtract from it
+# ─────────────────────────────────────────────
+if 'Amount' in display_df.columns and 'Type' in display_df.columns:
+    try:
+        # Work on a copy sorted oldest → newest for cumsum, then reverse back
+        rt_df = display_df.copy()
+        rt_df = rt_df.sort_values('Timestamp', ascending=True).reset_index(drop=True)
+
+        rt_df['_signed'] = rt_df.apply(
+            lambda r: float(r['Amount']) if str(r['Type']).lower() == 'debit'
+                      else -float(r['Amount']) if str(r['Type']).lower() == 'credit'
+                      else 0.0,
+            axis=1
+        )
+        rt_df['Running Total'] = rt_df['_signed'].cumsum()
+        rt_df = rt_df.drop(columns=['_signed'])
+
+        # Merge back into display_df (which is sorted newest first)
+        display_df = display_df.merge(
+            rt_df[['Timestamp', 'Running Total']],
+            on='Timestamp',
+            how='left',
+        )
+
+        # Insert Running Total after Amount
+        cols_list = list(display_df.columns)
+        if 'Running Total' in cols_list and 'Amount' in cols_list:
+            cols_list.remove('Running Total')
+            amt_idx = cols_list.index('Amount')
+            cols_list.insert(amt_idx + 1, 'Running Total')
+            display_df = display_df[cols_list]
+
+    except Exception:
+        pass  # if running total fails for any reason, continue without it
+
 col_config = {
-    "Amount":  st.column_config.NumberColumn(format="₹%.2f"),
-    "Balance": st.column_config.NumberColumn(format="₹%.0f", help="Running balance after this transaction"),
+    "Amount":        st.column_config.NumberColumn(format="₹%.2f"),
+    "Running Total": st.column_config.NumberColumn(
+        format="₹%.2f",
+        help="Cumulative spend for this filtered view (debits add, credits subtract)"
+    ),
+    "Balance":       st.column_config.NumberColumn(format="₹%.0f", help="Running account balance after this transaction"),
 }
 
 if can_delete:
@@ -1092,9 +1158,10 @@ if can_delete:
         use_container_width=True,
         height=420,
         column_config={
-            "🗑️ Select": st.column_config.CheckboxColumn("🗑️", help="Tick to mark for deletion", default=False),
-            "Amount":    st.column_config.NumberColumn(format="₹%.2f"),
-            "Balance":   st.column_config.NumberColumn(format="₹%.0f"),
+            "🗑️ Select":    st.column_config.CheckboxColumn("🗑️", help="Tick to mark for deletion", default=False),
+            "Amount":        st.column_config.NumberColumn(format="₹%.2f"),
+            "Running Total": st.column_config.NumberColumn(format="₹%.2f"),
+            "Balance":       st.column_config.NumberColumn(format="₹%.0f"),
         },
         disabled=disabled_cols,
         hide_index=True,
