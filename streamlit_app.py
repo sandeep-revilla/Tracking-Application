@@ -1075,7 +1075,7 @@ if start_sel and end_sel and not rows_df['timestamp'].isnull().all():
 # present in rows_df from calculate_running_balance();
 # just select and rename the desired columns.
 # ─────────────────────────────────────────────
-_desired     = ['timestamp', 'bank', 'type', 'amount', 'Balance', 'subtype', 'message']
+_desired     = ['timestamp', 'bank', 'type', 'amount', 'balance', 'subtype', 'message']
 col_map      = {c.lower(): c for c in rows_df.columns}
 display_cols = [col_map[d] for d in _desired if d in col_map]
 if not any(c.lower() == 'timestamp' for c in display_cols) and 'date' in col_map:
