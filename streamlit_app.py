@@ -500,14 +500,107 @@ if st.session_state.get('show_notif_panel', False):
         display_notif['created_at'] = pd.to_datetime(
             display_notif['created_at'], errors='coerce'
         )
+        display_notif['_ts_parsed'] = pd.to_datetime(
+            display_notif['timestamp'], errors='coerce'
+        )
         display_notif = display_notif.sort_values(
             'created_at', ascending=False
         ).reset_index(drop=True)
     else:
         display_notif = pd.DataFrame()
 
+    # ── Date filter for notifications ─────────────────────────────────────
+    if not display_notif.empty and '_ts_parsed' in display_notif.columns:
+        st.markdown("##### 📅 Filter Notifications by Date")
+
+        notif_filter_col1, notif_filter_col2 = st.columns([2, 4])
+
+        with notif_filter_col1:
+            notif_date_mode = st.selectbox(
+                "Filter by",
+                options=["All", "Year", "Month", "Single Date"],
+                index=0,
+                key="notif_date_mode",
+            )
+
+        with notif_filter_col2:
+            # ── Build available options from actual notification timestamps ──
+            valid_ts = display_notif['_ts_parsed'].dropna()
+
+            if notif_date_mode == "Year":
+                available_years = sorted(valid_ts.dt.year.unique().tolist(), reverse=True)
+                if available_years:
+                    sel_notif_year = st.selectbox(
+                        "Select Year",
+                        options=available_years,
+                        index=0,
+                        key="notif_year_filter",
+                    )
+                    display_notif = display_notif[
+                        display_notif['_ts_parsed'].dt.year == sel_notif_year
+                    ]
+                else:
+                    st.info("No year data available.")
+
+            elif notif_date_mode == "Month":
+                # Show year + month picker
+                available_years = sorted(valid_ts.dt.year.unique().tolist(), reverse=True)
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    sel_notif_year_m = st.selectbox(
+                        "Year",
+                        options=available_years,
+                        index=0,
+                        key="notif_month_year_filter",
+                    )
+                with mc2:
+                    month_map_notif = {i: pd.Timestamp(1900, i, 1).strftime('%B') for i in range(1, 13)}
+                    available_months = sorted(
+                        valid_ts[valid_ts.dt.year == sel_notif_year_m].dt.month.unique().tolist()
+                    )
+                    month_labels = [month_map_notif[m] for m in available_months]
+                    if month_labels:
+                        sel_notif_month_label = st.selectbox(
+                            "Month",
+                            options=month_labels,
+                            index=0,
+                            key="notif_month_filter",
+                        )
+                        inv_month_map = {v: k for k, v in month_map_notif.items()}
+                        sel_notif_month_num = inv_month_map[sel_notif_month_label]
+                        display_notif = display_notif[
+                            (display_notif['_ts_parsed'].dt.year  == sel_notif_year_m) &
+                            (display_notif['_ts_parsed'].dt.month == sel_notif_month_num)
+                        ]
+                    else:
+                        st.info("No months available for selected year.")
+
+            elif notif_date_mode == "Single Date":
+                # Derive min/max from actual notification timestamps
+                if not valid_ts.empty:
+                    _notif_min = valid_ts.min().date()
+                    _notif_max = valid_ts.max().date()
+                    sel_notif_date = st.date_input(
+                        "Pick date",
+                        value=_notif_max,
+                        min_value=_notif_min,
+                        max_value=_notif_max,
+                        key="notif_single_date_filter",
+                    )
+                    display_notif = display_notif[
+                        display_notif['_ts_parsed'].dt.date == sel_notif_date
+                    ]
+                else:
+                    st.info("No date data available.")
+
+            # ── Show how many matched ─────────────────────────────────────
+            if notif_date_mode != "All":
+                st.caption(f"{len(display_notif)} notification(s) match this filter")
+
+        st.markdown("")
+
     if display_notif.empty:
-        st.info("No new notifications 🎉")
+        st.info("No notifications match the selected filter 🎉")
     else:
         if '_expanded_notif_uid' not in st.session_state:
             st.session_state['_expanded_notif_uid'] = None
@@ -1070,11 +1163,6 @@ if start_sel and end_sel and not rows_df['timestamp'].isnull().all():
         (rows_df['timestamp'].dt.date <= end_sel)
     ]
 
-# ─────────────────────────────────────────────
-# Build display_df — Balance column is already
-# present in rows_df from calculate_running_balance();
-# just select and rename the desired columns.
-# ─────────────────────────────────────────────
 _desired     = ['timestamp', 'bank', 'type', 'amount', 'balance', 'subtype', 'message']
 col_map      = {c.lower(): c for c in rows_df.columns}
 display_cols = [col_map[d] for d in _desired if d in col_map]
@@ -1107,11 +1195,44 @@ if 'Timestamp' in display_df.columns:
 if 'timestamp' in rows_df.columns:
     rows_df = rows_df.sort_values(by='timestamp', ascending=False).reset_index(drop=True)
 
+# ─────────────────────────────────────────────
+# Running Total column
+# ─────────────────────────────────────────────
+if 'Amount' in display_df.columns and 'Type' in display_df.columns:
+    try:
+        rt_df = display_df.copy()
+        rt_df = rt_df.sort_values('Timestamp', ascending=True).reset_index(drop=True)
+        rt_df['_signed'] = rt_df.apply(
+            lambda r: float(r['Amount']) if str(r['Type']).lower() == 'debit'
+                      else -float(r['Amount']) if str(r['Type']).lower() == 'credit'
+                      else 0.0,
+            axis=1
+        )
+        rt_df['Running Total'] = rt_df['_signed'].cumsum()
+        rt_df = rt_df.drop(columns=['_signed'])
+        display_df = display_df.merge(
+            rt_df[['Timestamp', 'Running Total']],
+            on='Timestamp',
+            how='left',
+        )
+        cols_list = list(display_df.columns)
+        if 'Running Total' in cols_list and 'Amount' in cols_list:
+            cols_list.remove('Running Total')
+            amt_idx = cols_list.index('Amount')
+            cols_list.insert(amt_idx + 1, 'Running Total')
+            display_df = display_df[cols_list]
+    except Exception:
+        pass
+
 col_config = {
-    "Amount":  st.column_config.NumberColumn(format="₹%.2f"),
-    "Balance": st.column_config.NumberColumn(
+    "Amount":        st.column_config.NumberColumn(format="₹%.2f"),
+    "Running Total": st.column_config.NumberColumn(
+        format="₹%.2f",
+        help="Cumulative spend (debits add, credits subtract)"
+    ),
+    "Balance":       st.column_config.NumberColumn(
         format="₹%.0f",
-        help="Running account balance after this transaction (from start balance in Balances sheet)",
+        help="Running account balance after this transaction",
     ),
 }
 
@@ -1124,9 +1245,10 @@ if can_delete:
         use_container_width=True,
         height=420,
         column_config={
-            "🗑️ Select": st.column_config.CheckboxColumn("🗑️", help="Tick to mark for deletion", default=False),
-            "Amount":    st.column_config.NumberColumn(format="₹%.2f"),
-            "Balance":   st.column_config.NumberColumn(format="₹%.0f"),
+            "🗑️ Select":    st.column_config.CheckboxColumn("🗑️", help="Tick to mark for deletion", default=False),
+            "Amount":        st.column_config.NumberColumn(format="₹%.2f"),
+            "Running Total": st.column_config.NumberColumn(format="₹%.2f"),
+            "Balance":       st.column_config.NumberColumn(format="₹%.0f"),
         },
         disabled=disabled_cols,
         hide_index=True,
